@@ -24,13 +24,11 @@ request = urllib.request.Request(
     data=json.dumps({
         'model': 'muse-spark-1.3',
         'messages': [{'role': 'user', 'content': 'Reply with the single word: ready'}],
-        'reasoning_effort': 'none',
-        'max_completion_tokens': 256,
     }).encode(),
     headers={'Authorization': 'Bearer ' + os.environ['NAIJALEDGER_META_KEY'], 'Content-Type': 'application/json'},
 )
 try:
-    with urllib.request.urlopen(request, timeout=40) as response:
+    with urllib.request.urlopen(request, timeout=60) as response:
         data = json.load(response)
     content = data.get('choices', [{}])[0].get('message', {}).get('content', '')
     if not content or 'ready' not in content.lower():
@@ -38,7 +36,16 @@ try:
         sys.exit(1)
     print('Meta Muse Spark 1.3 connectivity test passed.')
 except urllib.error.HTTPError as error:
-    print(f'Meta returned HTTP {error.code}; no cloud settings changed. Check key access and available credits.', file=sys.stderr)
+    print(f'Meta returned HTTP {error.code}; no cloud settings changed.', file=sys.stderr)
+    try:
+        body = json.loads(error.read(16000))
+        detail = body.get('error', {})
+        if isinstance(detail, dict):
+            message = str(detail.get('message', 'No error message provided'))
+            message = message.replace(os.environ['NAIJALEDGER_META_KEY'], '[REDACTED]')
+            print('Meta error: ' + message[:600], file=sys.stderr)
+    except Exception:
+        print('Meta did not return a readable error description.', file=sys.stderr)
     sys.exit(1)
 except Exception:
     print('Meta connectivity test failed; no cloud settings changed. Check the network and retry.', file=sys.stderr)
