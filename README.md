@@ -7,7 +7,7 @@
 - Firebase Google sign-in. Every API request verifies a Firebase ID token on the server. Firestore stores an isolated, persistent workspace under the verified user's UID.
 - First sign-in seeds a synthetic sample business. CSV imports and approvals are atomic Firestore transactions with version checks; a stale tab receives HTTP 409 instead of overwriting a later decision.
 - Amounts use integer kobo. Exact-amount credits within 14 days are proposed only when there is no competing invoice. POS deductions, capital, loans, and unknown credits remain unresolved.
-- “Investigate with Meta” sends one selected invoice and up to 12 bank credits to Muse Spark 1.3. The model returns a constrained evidence brief: hypotheses, cited bank IDs, missing evidence, and next checks. The server rejects invented citations and caps the output. Briefs and source fingerprints persist in the workspace. They never approve a match or determine tax treatment.
+- “Investigate with Meta” sends one selected invoice and up to 12 bank credits to Muse Spark 1.3. The model returns a constrained evidence brief. A second independent Muse pass reviews groundedness, while deterministic checks verify the schema, source fingerprint, citations, amounts, and decision boundary. The persisted verification receipt records attempts and requires explicit human sign-off. Neither model can approve a match or determine tax treatment.
 - A review pack downloads source hashes, decisions, unresolved rows, audit activity, and AI briefs as JSON for accountant review.
 
 ## Run locally
@@ -37,8 +37,8 @@ The Express server alone calls Meta Model API. Firestore rules deny all browser 
 
 ## Remaining work before production or judging
 
-- Connect a real Firebase project and Meta key, deploy rules, and run an end-to-end test with two real sign-ins. No project credentials are included here.
-- Deploy the HTTPS backend and frontend, configure authorized domains, and run a live demo. Source code in GitHub is not a hosted app.
+- Run the live workflow with a second Google account to document workspace isolation as part of the final test evidence.
+- Capture the production verification receipt, human sign-off, persistence after reload, and exported review pack in the final demo.
 - Add partial/split settlement allocations, POS fee evidence, document ingestion, finer role permissions, storage for raw evidence, and retention/deletion controls. Current exact matching intentionally leaves these cases unresolved.
 - Test with realistic **synthetic** scenarios and record a concise demo showing ambiguity, human review, persistent reload, and the cited Meta brief.
 
@@ -64,4 +64,4 @@ If you already cloned it, run `git pull` in that checkout first. The script enab
 
 For Meta investigations, store `MODEL_API_KEY` in Google Secret Manager and attach it to the Cloud Run service as the `MODEL_API_KEY` environment variable. Grant the runtime identity access to that specific secret. Do not put the value in this script, Dockerfile, Git, or browser configuration. Deploying without the secret leaves reconciliation available and returns a configuration error for investigations.
 
-The agent's browser could not access the Google Cloud console, so the deployment has not been executed or verified yet. The checked-in deployment files are ready for Cloud Shell; they are not proof of a live service.
+The production service is hosted at `https://naijaledger-793831462989.europe-west1.run.app/`. Deployment credentials and private keys are not stored in this repository.
