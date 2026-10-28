@@ -14,6 +14,7 @@ export function parseCsv(text,kind) {
   return rows.filter(r=>r.some(x=>x.trim())).map((row,i)=>{
     if(row.length!==headers.length) throw new Error(`Row ${i+2}: wrong number of columns`);
     const obj=Object.fromEntries(headers.map((name,j)=>[name,row[j].trim()]));
+    if(Object.values(obj).some(value=>value.length>160)) throw new Error(`Row ${i+2}: field exceeds 160 characters`);
     if(!obj.id || ids.has(obj.id)) throw new Error(`Row ${i+2}: missing or duplicate ID`);
     ids.add(obj.id);
     if(!/^\d{4}-\d{2}-\d{2}$/.test(obj.date)) throw new Error(`Row ${i+2}: invalid date`);
