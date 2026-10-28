@@ -15,6 +15,17 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
   const app = express();
   app.disable('x-powered-by');
   app.use(express.json({ limit: '1mb' }));
+  app.get('/firebase-config.js', (_req, res) => {
+    const projectId = process.env.FIREBASE_PROJECT_ID || '';
+    const config = {
+      apiKey: process.env.FIREBASE_WEB_API_KEY || '',
+      projectId,
+      authDomain: process.env.FIREBASE_AUTH_DOMAIN || `${projectId}.firebaseapp.com`,
+      appId: process.env.FIREBASE_WEB_APP_ID || '',
+    };
+    res.set('Cache-Control', 'no-store').type('application/javascript')
+      .send(`window.__NAIJALEDGER_FIREBASE__=${JSON.stringify(config).replaceAll('<', '\\u003c')};`);
+  });
   app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
   app.use('/api', route(async (req, res, next) => {
     const match = /^Bearer ([^\s]+)$/.exec(req.get('authorization') || '');
