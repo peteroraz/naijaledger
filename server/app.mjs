@@ -70,6 +70,14 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
     const saved = await store.saveBrief(req.uid, version, invoiceId, brief);
     res.json({ invoiceId, brief, workspace: view(saved) });
   }));
+  app.post('/api/brief-reviews', route(async (req, res) => {
+    const { invoiceId, sourceFingerprint, version } = req.body || {};
+    if (typeof invoiceId !== 'string' || typeof sourceFingerprint !== 'string') {
+      return res.status(400).json({ error: 'Select a current evidence brief' });
+    }
+    const state = await store.reviewBrief(req.uid, version, invoiceId, sourceFingerprint);
+    res.json(view(state));
+  }));
   app.get('/api/handover', route(async (req, res) => {
     const state = await store.get(req.uid);
     const report = {

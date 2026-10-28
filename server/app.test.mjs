@@ -79,6 +79,7 @@ test('structured Meta brief cites only supplied bank records and cannot approve 
       const request = JSON.parse(init.body);
       assert.equal(request.model, 'muse-spark-1.3');
       assert.equal(request.reasoning_effort, 'minimal');
+      assert.equal(request.response_format.json_schema.name, 'naijaledger_evidence_brief');
       assert.equal(request.max_completion_tokens, 2400);
       assert.equal(request.response_format.type, 'json_schema');
       return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify({
@@ -92,6 +93,38 @@ test('structured Meta brief cites only supplied bank records and cannot approve 
   assert.equal(brief.hypotheses[0].confidence, 'low');
   assert.equal(brief.status, 'unverified');
   assert.equal(brief.sourceFingerprint, evidence.sourceFingerprint);
+  assert.equal(brief.verification.status, 'human_review_required');
+  assert.equal(brief.verification.checks.find(check => check.id === 'citations').passed, false);
+  assert.equal(brief.verification.modelReview.verdict, 'skipped');
+});
+
+test('independent Muse review produces a persisted-ready verification receipt', async () => {
+  const state = await createFirestoreStore(fakeFirestore()).get('alice');
+  const evidence = evidenceFor(state, 'INV-002');
+  let calls = 0;
+  const brief = await investigateWithMeta(evidence, {
+    apiKey: 'test-only',
+    fetcher: async (_url, init) => {
+      calls += 1;
+      const request = JSON.parse(init.body);
+      const name = request.response_format.json_schema.name;
+      const content = name === 'naijaledger_evidence_brief' ? {
+        summary: 'BNK-004 may be a net settlement related to this invoice.',
+        hypotheses: [{ explanation: 'The NGN 78,800 credit is NGN 1,200 below the invoice.', evidenceIds: ['BNK-004'], nextStep: 'Inspect the POS settlement report.', confidence: 'medium' }],
+        missingEvidence: ['POS settlement report'],
+      } : {
+        verdict: 'supported', checkedClaims: 3, issues: [],
+      };
+      assert.ok(['naijaledger_evidence_brief', 'naijaledger_groundedness_review'].includes(name));
+      return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(content) } }] }) };
+    },
+  });
+  assert.equal(calls, 2);
+  assert.equal(brief.verification.status, 'checks_passed');
+  assert.ok(brief.verification.checks.every(check => check.passed));
+  assert.equal(brief.verification.modelReview.verdict, 'supported');
+  assert.equal(brief.verification.modelReview.checkedClaims, 3);
+  assert.deepEqual(brief.verification.humanReview, { status: 'pending' });
 });
 
 test('empty Meta output returns a safe actionable error', async () => {
@@ -105,5 +138,27 @@ test('empty Meta output returns a safe actionable error', async () => {
       }) }),
     }),
     error => error.status === 502 && /output limit/.test(error.message),
+  );
+});
+
+test('human evidence-brief sign-off is versioned and retained in the audit trail', async () => {
+  const db = fakeFirestore();
+  const store = createFirestoreStore(db);
+  const original = await store.get('alice');
+  const evidence = evidenceFor(original, 'INV-002');
+  const generated = {
+    summary: 'Possible net settlement.', hypotheses: [], missingEvidence: [],
+    model: 'muse-spark-1.3', status: 'unverified', sourceFingerprint: evidence.sourceFingerprint,
+    createdAt: new Date().toISOString(),
+    verification: { status: 'checks_passed', checks: [], modelReview: { verdict: 'supported', issues: [], checkedClaims: 1 }, attempts: { generation: 1, verifier: 1, maximum: 3 }, humanReview: { status: 'pending' } },
+  };
+  await store.saveBrief('alice', original.version, 'INV-002', generated);
+  const reviewed = await store.reviewBrief('alice', original.version, 'INV-002', evidence.sourceFingerprint);
+  assert.equal(reviewed.version, original.version + 1);
+  assert.equal(reviewed.briefs['INV-002'].verification.humanReview.status, 'reviewed');
+  assert.equal(reviewed.audit.at(-1).action, 'brief-reviewed');
+  await assert.rejects(
+    store.reviewBrief('alice', original.version, 'INV-002', evidence.sourceFingerprint),
+    error => error.status === 409,
   );
 });

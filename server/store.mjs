@@ -72,5 +72,34 @@ export function createFirestoreStore(db) {
         return state;
       });
     },
+    async reviewBrief(uid, expectedVersion, invoiceId, sourceFingerprint) {
+      return db.runTransaction(async tx => {
+        const doc = ref(uid);
+        const snap = await tx.get(doc);
+        if (!snap.exists || snap.data().version !== expectedVersion) {
+          const error = new Error('Workspace changed; reload before signing off');
+          error.status = 409;
+          throw error;
+        }
+        const state = snap.data();
+        const brief = state.briefs?.[invoiceId];
+        if (!brief || brief.sourceFingerprint !== sourceFingerprint) {
+          const error = new Error('Evidence brief changed; investigate again before signing off');
+          error.status = 409;
+          throw error;
+        }
+        const reviewedAt = new Date().toISOString();
+        brief.verification = brief.verification || {};
+        brief.verification.humanReview = { status: 'reviewed', reviewedAt, reviewedBy: uid };
+        state.version += 1;
+        state.updatedAt = reviewedAt;
+        state.audit = [...(state.audit || []), {
+          action: 'brief-reviewed', invoiceId, at: reviewedAt,
+          by: uid, sourceFingerprint,
+        }].slice(-100);
+        tx.set(doc, state);
+        return state;
+      });
+    },
   };
 }
