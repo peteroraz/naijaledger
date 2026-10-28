@@ -110,7 +110,7 @@ test('independent Muse review produces a persisted-ready verification receipt', 
       const name = request.response_format.json_schema.name;
       const content = name === 'naijaledger_evidence_brief' ? {
         summary: 'BNK-004 may be a net settlement related to this invoice.',
-        hypotheses: [{ explanation: 'The NGN 78,800 credit is NGN 1,200 below the invoice.', evidenceIds: ['BNK-004'], nextStep: 'Inspect the POS settlement report.', confidence: 'medium' }],
+        hypotheses: [{ explanation: 'The NGN 78,800 credit is NGN 1,200 below INV-002.', evidenceIds: ['INV-002', 'BNK-004'], nextStep: 'Inspect the POS settlement report.', confidence: 'medium' }],
         missingEvidence: ['POS settlement report'],
       } : {
         verdict: 'supported', checkedClaims: 3, issues: [],
@@ -120,6 +120,7 @@ test('independent Muse review produces a persisted-ready verification receipt', 
     },
   });
   assert.equal(calls, 2);
+  assert.deepEqual(brief.hypotheses[0].evidenceIds, ['INV-002', 'BNK-004']);
   assert.equal(brief.verification.status, 'checks_passed');
   assert.ok(brief.verification.checks.every(check => check.passed));
   assert.equal(brief.verification.modelReview.verdict, 'supported');
