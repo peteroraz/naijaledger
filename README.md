@@ -46,7 +46,7 @@ References: [Firebase ID token verification](https://firebase.google.com/docs/au
 
 ## Cloud deployment (Google Cloud Run)
 
-Cloud Run serves the React build and authenticated API from one HTTPS origin. It uses the existing Firestore database in `europe-west1`. Its runtime service account gets `roles/datastore.user`; no downloaded Firebase private key is needed. The included Firebase Web identifiers are public, and can be overridden with Vite environment variables when building for a different project.
+Cloud Run serves the React build and authenticated API from one HTTPS origin. It uses the existing Firestore database in `europe-west1`. Its runtime service account gets `roles/datastore.user`; no downloaded Firebase private key is needed. The backend serves public Firebase Web configuration at runtime. The deploy script prompts for the public Web API key; private server credentials are never sent to the browser.
 
 1. Link a Cloud Billing account to `naijaledger-ed044` (Firebase Spark becomes Blaze). Cloud Run has free usage allowances, but this is a metered deployment. Maximum instances is set to two; this is not a spending cap.
 2. Open Google Cloud Shell and run:

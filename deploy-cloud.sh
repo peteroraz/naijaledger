@@ -8,6 +8,11 @@ REGION=europe-west1
 SERVICE=naijaledger
 SERVICE_ACCOUNT=naijaledger-runtime
 IDENTITY="${SERVICE_ACCOUNT}@${PROJECT}.iam.gserviceaccount.com"
+read -r -p 'Paste the public Firebase Web apiKey from your Firebase app config: ' FIREBASE_WEB_API_KEY
+if [[ -z "$FIREBASE_WEB_API_KEY" ]]; then
+  printf 'Firebase Web API key is required.\n' >&2
+  exit 1
+fi
 
 gcloud config set project "$PROJECT"
 gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com firestore.googleapis.com
@@ -24,7 +29,7 @@ gcloud projects add-iam-policy-binding "$PROJECT" --member="serviceAccount:${BUI
 
 gcloud run deploy "$SERVICE" --source . --project "$PROJECT" --region "$REGION" \
   --service-account "$IDENTITY" --allow-unauthenticated \
-  --set-env-vars "FIREBASE_PROJECT_ID=${PROJECT}" \
+  --set-env-vars "FIREBASE_PROJECT_ID=${PROJECT},FIREBASE_WEB_API_KEY=${FIREBASE_WEB_API_KEY},FIREBASE_WEB_APP_ID=1:793831462989:web:348988662e1b2adc8e6404" \
   --min-instances 0 --max-instances 2 --memory 512Mi --cpu 1 --concurrency 20 --timeout 60 --quiet
 
 SERVICE_URL=$(gcloud run services describe "$SERVICE" --project "$PROJECT" --region "$REGION" --format='value(status.url)')
