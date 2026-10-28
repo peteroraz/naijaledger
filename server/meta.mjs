@@ -52,16 +52,28 @@ export async function investigateWithMeta(evidence, { apiKey = process.env.MODEL
         { role: 'user', content: JSON.stringify({ task: 'Investigate this unresolved invoice against shortlisted bank credits. The list can omit other transactions.', ...evidence }) },
       ],
       response_format: schema,
-      max_completion_tokens: 900,
+      // Muse Spark's private reasoning tokens count against this same budget.
+      // Keep reasoning light so the constrained JSON has enough room to finish.
+      reasoning_effort: 'minimal',
+      max_completion_tokens: 2400,
     }),
-    signal: AbortSignal.timeout(30000),
+    signal: AbortSignal.timeout(45000),
   });
   if (!response.ok) { const error = new Error(`Meta API returned HTTP ${response.status}`); error.status = 502; throw error; }
   const data = await response.json();
+  const content = data?.choices?.[0]?.message?.content;
+  if (typeof content !== 'string' || !content.trim()) {
+    const finish = data?.choices?.[0]?.finish_reason;
+    const error = new Error(finish === 'length'
+      ? 'Meta reached its output limit before completing the evidence brief; please retry'
+      : 'Meta returned no evidence brief; please retry');
+    error.status = 502;
+    throw error;
+  }
   let result;
-  try { result = JSON.parse(data.choices[0].message.content); }
+  try { result = JSON.parse(content); }
   catch { const error = new Error('Meta returned an unreadable evidence brief'); error.status = 502; throw error; }
-  if (typeof result.summary !== 'string' || !Array.isArray(result.hypotheses) || !Array.isArray(result.missingEvidence)) {
+  if (!result || typeof result.summary !== 'string' || !Array.isArray(result.hypotheses) || !Array.isArray(result.missingEvidence)) {
     const error = new Error('Meta returned an incomplete evidence brief'); error.status = 502; throw error;
   }
   const allowed = new Set(evidence.candidates.map(x => x.id));
