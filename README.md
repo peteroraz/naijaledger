@@ -43,3 +43,25 @@ The Express server alone calls Meta Model API. Firestore rules deny all browser 
 - Test with realistic **synthetic** scenarios and record a concise demo showing ambiguity, human review, persistent reload, and the cited Meta brief.
 
 References: [Firebase ID token verification](https://firebase.google.com/docs/auth/admin/verify-id-tokens), [Firestore transactions](https://firebase.google.com/docs/firestore/manage-data/transactions), [Meta structured output](https://dev.meta.ai/docs/cookbook/structured-output), [hackathon page](https://events.cerebralvalley.ai/e/meta-ai-developer-hackathon).
+
+## Cloud deployment (Google Cloud Run)
+
+Cloud Run serves the React build and authenticated API from one HTTPS origin. It uses the existing Firestore database in `europe-west1`. Its runtime service account gets `roles/datastore.user`; no downloaded Firebase private key is needed. The included Firebase Web identifiers are public, and can be overridden with Vite environment variables when building for a different project.
+
+1. Link a Cloud Billing account to `naijaledger-ed044` (Firebase Spark becomes Blaze). Cloud Run has free usage allowances, but this is a metered deployment. Maximum instances is set to two; this is not a spending cap.
+2. Open Google Cloud Shell and run:
+
+```bash
+git clone https://github.com/peteroraz/naijaledger.git
+cd naijaledger
+bash deploy-cloud.sh
+```
+
+If you already cloned it, run `git pull` in that checkout first. The script enables required APIs, creates the runtime identity if missing, grants database/build access, and deploys from source using the Dockerfile. It requires project owner or equivalent permissions. The runtime uses Application Default Credentials provided by Google.
+
+3. Copy the returned Cloud Run hostname (without `https://`) into Firebase Authentication → Settings → Authorized domains. The Cloud Run page is publicly reachable, while all financial API routes still require a verified Firebase ID token.
+4. Test `/api/health`, Google sign-in, one approval, a page reload, then sign out and back in. Confirm the approval remains and that another account has a separate workspace.
+
+For Meta investigations, store `MODEL_API_KEY` in Google Secret Manager and attach it to the Cloud Run service as the `MODEL_API_KEY` environment variable. Grant the runtime identity access to that specific secret. Do not put the value in this script, Dockerfile, Git, or browser configuration. Deploying without the secret leaves reconciliation available and returns a configuration error for investigations.
+
+The agent's browser could not access the Google Cloud console, so the deployment has not been executed or verified yet. The checked-in deployment files are ready for Cloud Shell; they are not proof of a live service.
