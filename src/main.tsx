@@ -6,9 +6,17 @@ import './style.css';
 
 type Row = { id: string; date: string; amountKobo: number; sourceRow: number; customer?: string; description?: string };
 type Match = { invoiceId: string; bankId: string; amountKobo: number; reason?: string };
+type Verification = {
+  status: 'checks_passed' | 'human_review_required'; checkedAt: string;
+  checks: { id: string; label: string; passed: boolean; detail: string }[];
+  modelReview: { model: string; verdict: 'supported' | 'needs_review' | 'unavailable' | 'skipped'; checkedClaims: number; issues: { claim: string; reason: string; evidenceIds: string[] }[] };
+  attempts: { generation: number; verifier: number; maximum: number };
+  humanReview: { status: 'pending' | 'reviewed'; reviewedAt?: string; reviewedBy?: string };
+};
 type Brief = {
   summary: string; hypotheses: { explanation: string; evidenceIds: string[]; nextStep: string; confidence: 'low' | 'medium' }[];
   missingEvidence: string[]; model: string; status: string; sourceFingerprint: string; createdAt: string;
+  verification?: Verification;
 };
 type Workspace = {
   invoices: Row[]; bank: Row[]; proposals: Match[]; matches: Match[]; unresolvedInvoices: Row[]; unresolvedBank: Row[];
@@ -63,7 +71,7 @@ function Welcome() {
   </main>;
 }
 
-function EvidenceBrief({ brief, bank }: { brief: Brief; bank: Row[] }) {
+function EvidenceBrief({ brief, bank, onReview, reviewing }: { brief: Brief; bank: Row[]; onReview: () => void; reviewing: boolean }) {
   const cited = (id: string) => bank.find(row => row.id === id);
   return <div className="brief" aria-label="Meta evidence brief">
     <div className="brief-heading"><span className="spark">✦</span><div><strong>Muse Spark evidence brief</strong><small>Unverified hypothesis · {new Date(brief.createdAt).toLocaleString('en-NG')}</small></div><span className="model-badge">{brief.model}</span></div>
@@ -78,6 +86,13 @@ function EvidenceBrief({ brief, bank }: { brief: Brief; bank: Row[] }) {
       <div className="next-step"><small>NEXT CHECK</small><p>{h.nextStep}</p></div>
     </article>)}</div>
     {brief.missingEvidence.length > 0 && <div className="missing"><strong>Evidence still needed</strong><ul>{brief.missingEvidence.map((item, i) => <li key={i}>{item}</li>)}</ul></div>}
+    {brief.verification && <section className={`receipt ${brief.verification.status}`} aria-label="Verification receipt">
+      <div className="receipt-head"><div><small>VERIFICATION RECEIPT</small><strong>{brief.verification.status === 'checks_passed' ? 'Automated checks passed' : 'Human attention required'}</strong></div><span>{brief.verification.checks.filter(check => check.passed).length}/{brief.verification.checks.length} deterministic checks</span></div>
+      <div className="check-grid">{brief.verification.checks.map(check => <div className={check.passed ? 'check pass' : 'check fail'} key={check.id}><b>{check.passed ? '✓' : '!'}</b><div><strong>{check.label}</strong><p>{check.detail}</p></div></div>)}</div>
+      <div className="verifier-row"><div><small>INDEPENDENT MUSE REVIEW</small><strong>{brief.verification.modelReview.verdict === 'supported' ? 'Groundedness supported' : brief.verification.modelReview.verdict === 'needs_review' ? 'Claims need review' : 'Verifier did not complete'}</strong><p>{brief.verification.modelReview.checkedClaims} claims checked · Generation attempt {brief.verification.attempts.generation}/{brief.verification.attempts.maximum}</p></div><span className={`verdict ${brief.verification.modelReview.verdict}`}>{brief.verification.modelReview.verdict.replace('_', ' ')}</span></div>
+      {brief.verification.modelReview.issues.length > 0 && <div className="verification-issues">{brief.verification.modelReview.issues.map((issue, i) => <p key={i}><strong>{issue.claim}</strong> — {issue.reason}</p>)}</div>}
+      <div className="human-signoff"><div><small>HUMAN CHECKPOINT</small><strong>{brief.verification.humanReview.status === 'reviewed' ? 'Brief reviewed by a person' : 'Review is still required'}</strong><p>This confirms the evidence brief was read. It does not approve a payment match or tax treatment.</p></div>{brief.verification.humanReview.status === 'reviewed' ? <span className="reviewed">✓ Reviewed {brief.verification.humanReview.reviewedAt && new Date(brief.verification.humanReview.reviewedAt).toLocaleString('en-NG')}</span> : <button disabled={reviewing} onClick={onReview}>{reviewing ? 'Saving review…' : 'Mark brief reviewed'}</button>}</div>
+    </section>}
     <small className="provenance">Source fingerprint: {brief.sourceFingerprint.slice(0, 16)} · AI cannot approve matches or determine tax treatment.</small>
   </div>;
 }
@@ -112,6 +127,13 @@ function Desk({ user }: { user: User }) {
     } catch (e) { setError((e as Error).message); void refresh(); }
     finally { setBusy(''); }
   }
+  async function reviewBrief(id: string, brief: Brief) {
+    if (!data) return;
+    setBusy(`review-${id}`); setError('');
+    try { setData(await api<Workspace>(user, '/brief-reviews', json({ invoiceId: id, sourceFingerprint: brief.sourceFingerprint, version: data.version }))); }
+    catch (e) { setError((e as Error).message); void refresh(); }
+    finally { setBusy(''); }
+  }
   async function downloadPack() {
     setBusy('export'); setError('');
     try {
@@ -133,9 +155,9 @@ function Desk({ user }: { user: User }) {
       <section className="stats"><article><small>Invoices</small><b>{money(data.totals.invoicedKobo)}</b><span>{data.invoices.length} sales records</span></article><article><small>Bank credits</small><b>{money(data.totals.bankCreditsKobo)}</b><span>Includes funds needing classification</span></article><article><small>Approved matches</small><b>{money(data.totals.approvedKobo)}</b><span>{data.matches.length} reviewed allocations</span></article><article><small>Needs investigation</small><b>{data.unresolvedInvoices.length}</b><span>Invoices without a simple match</span></article></section>
       <section className="card imports"><div className="sectionhead"><div><p className="eyebrow">01 · SOURCE RECORDS</p><h2>Import your records</h2><p>Start with the synthetic sample or upload a CSV with the required columns.</p></div><span className="pill">Saved workspace</span></div><div className="filegrid">{(['invoices', 'bank'] as const).map(kind => <label className="drop" key={kind}><strong>{kind === 'invoices' ? 'Sales invoices' : 'Bank transactions'}</strong><span>{kind === 'invoices' ? 'id, date, customer, amount' : 'id, date, description, amount'}</span><input aria-label={`Upload ${kind} CSV`} type="file" accept=".csv,text/csv" disabled={!!busy} onChange={e => { void importFile(kind, e.target.files?.[0]); e.target.value = ''; }} /><em>{busy === kind ? 'Importing…' : 'Choose CSV file'}</em><small>{data[kind].length} rows · Source SHA-256 {data.imports[kind]?.slice(0, 12)}…</small></label>)}</div><p className="fine">Importing either file resets approvals and AI briefs so decisions never silently carry over to new records.</p></section>
       <section className="card"><div className="sectionhead"><div><p className="eyebrow">02 · RECONCILIATION DESK</p><h2>Suggested matches</h2><p>Exact amount and date are suggestions. Check source rows before approving.</p></div><span className="pill">{data.proposals.length} to review</span></div><div className="list">{data.proposals.map(p => <div className="pair" key={p.invoiceId}><div><b>{p.invoiceId} <span>↔</span> {p.bankId}</b><p>{row(p.invoiceId, data.invoices)?.customer} · Invoice row {row(p.invoiceId, data.invoices)?.sourceRow} · Bank row {row(p.bankId, data.bank)?.sourceRow}</p><small>{p.reason}</small></div><div className="pair-action"><strong>{money(p.amountKobo)}</strong><button disabled={!!busy} onClick={() => void approve(p)}>{busy === p.invoiceId ? 'Saving…' : 'Approve match'}</button></div></div>)}{data.proposals.length === 0 && <p className="empty">No exact match proposals to review.</p>}</div></section>
-      <section className="card"><div className="sectionhead"><div><p className="eyebrow">03 · META EVIDENCE LAB</p><h2>Unresolved invoices</h2><p>Explore possible explanations with cited records and a concrete next check.</p></div></div><div className="list">{data.unresolvedInvoices.map(inv => <div className="unresolved" key={inv.id}><div className="unresolved-head"><div><b>{inv.id} · {inv.customer}</b><p>{inv.date} · Source row {inv.sourceRow}</p></div><strong>{money(inv.amountKobo)}</strong><button disabled={!!busy} onClick={() => void investigate(inv.id)}>{busy === inv.id ? 'Investigating…' : data.briefs[inv.id] ? 'Refresh brief' : 'Investigate with Meta'}</button></div><p className="consent-note">This sends this invoice and up to 12 relevant bank credit rows to Meta Model API.</p>{data.briefs[inv.id] && <EvidenceBrief brief={data.briefs[inv.id]} bank={data.bank} />}</div>)}{data.unresolvedInvoices.length === 0 && <p className="empty">No unresolved invoices.</p>}</div></section>
+      <section className="card"><div className="sectionhead"><div><p className="eyebrow">03 · META EVIDENCE LAB</p><h2>Unresolved invoices</h2><p>Explore possible explanations with cited records, independent verification, and a human checkpoint.</p></div></div><div className="list">{data.unresolvedInvoices.map(inv => <div className="unresolved" key={inv.id}><div className="unresolved-head"><div><b>{inv.id} · {inv.customer}</b><p>{inv.date} · Source row {inv.sourceRow}</p></div><strong>{money(inv.amountKobo)}</strong><button disabled={!!busy} onClick={() => void investigate(inv.id)}>{busy === inv.id ? 'Investigating + verifying…' : data.briefs[inv.id] ? 'Regenerate brief' : 'Investigate with Meta'}</button></div><p className="consent-note">This sends this invoice and up to 12 relevant bank credit rows to Meta Model API. A second independent Muse pass checks the resulting claims.</p>{data.briefs[inv.id] && <EvidenceBrief brief={data.briefs[inv.id]} bank={data.bank} onReview={() => void reviewBrief(inv.id, data.briefs[inv.id])} reviewing={busy === `review-${inv.id}`} />}</div>)}{data.unresolvedInvoices.length === 0 && <p className="empty">No unresolved invoices.</p>}</div></section>
       <section className="card"><div className="sectionhead"><div><p className="eyebrow">04 · BANK REVIEW</p><h2>Unresolved bank entries</h2><p>Review fees, other income, capital, loans and unmatched customer payments.</p></div></div><div className="tablewrap"><table><thead><tr><th>Source</th><th>Date</th><th>Description</th><th>Amount</th></tr></thead><tbody>{data.unresolvedBank.map(b => <tr key={b.id}><td>{b.id} <small>row {b.sourceRow}</small></td><td>{b.date}</td><td>{b.description}</td><td>{money(b.amountKobo)}</td></tr>)}</tbody></table></div></section>
-      <section className="card handover"><div className="sectionhead"><div><p className="eyebrow">05 · REVIEW TRAIL</p><h2>A clear handover</h2><p>Export the source hashes, decisions, unresolved items, and AI briefs for accountant review.</p></div><button disabled={!!busy} onClick={() => void downloadPack()}>{busy === 'export' ? 'Preparing…' : 'Download review pack'}</button></div><div className="activity">{data.audit.slice(-5).reverse().map((event, index) => <div key={`${event.at}-${index}`}><span className="activity-dot"/><strong>{event.action === 'imported' ? `Imported ${event.rows} ${event.kind} rows` : event.action === 'approved' ? `Approved ${event.invoiceId} ↔ ${event.bankId}` : `Investigated ${event.invoiceId}`}</strong><time>{new Date(event.at).toLocaleString('en-NG')}</time></div>)}{data.audit.length === 0 && <p className="empty">Your review activity will appear here.</p>}</div></section>
+      <section className="card handover"><div className="sectionhead"><div><p className="eyebrow">05 · REVIEW TRAIL</p><h2>A clear handover</h2><p>Export source hashes, decisions, verification receipts, unresolved items, and AI briefs for accountant review.</p></div><button disabled={!!busy} onClick={() => void downloadPack()}>{busy === 'export' ? 'Preparing…' : 'Download review pack'}</button></div><div className="activity">{data.audit.slice(-5).reverse().map((event, index) => <div key={`${event.at}-${index}`}><span className="activity-dot"/><strong>{event.action === 'imported' ? `Imported ${event.rows} ${event.kind} rows` : event.action === 'approved' ? `Approved ${event.invoiceId} ↔ ${event.bankId}` : event.action === 'brief-reviewed' ? `Human reviewed ${event.invoiceId} evidence brief` : `Investigated and verified ${event.invoiceId}`}</strong><time>{new Date(event.at).toLocaleString('en-NG')}</time></div>)}{data.audit.length === 0 && <p className="empty">Your review activity will appear here.</p>}</div></section>
     </>}
     <footer>NaijaLedger beta · Human approval required · No tax filing</footer>
   </main>;
