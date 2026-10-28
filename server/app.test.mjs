@@ -78,6 +78,8 @@ test('structured Meta brief cites only supplied bank records and cannot approve 
     fetcher: async (_url, init) => {
       const request = JSON.parse(init.body);
       assert.equal(request.model, 'muse-spark-1.3');
+      assert.equal(request.reasoning_effort, 'minimal');
+      assert.equal(request.max_completion_tokens, 2400);
       assert.equal(request.response_format.type, 'json_schema');
       return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify({
         summary: 'Check the deduction.',
@@ -90,4 +92,18 @@ test('structured Meta brief cites only supplied bank records and cannot approve 
   assert.equal(brief.hypotheses[0].confidence, 'low');
   assert.equal(brief.status, 'unverified');
   assert.equal(brief.sourceFingerprint, evidence.sourceFingerprint);
+});
+
+test('empty Meta output returns a safe actionable error', async () => {
+  const state = await createFirestoreStore(fakeFirestore()).get('alice');
+  const evidence = evidenceFor(state, 'INV-002');
+  await assert.rejects(
+    investigateWithMeta(evidence, {
+      apiKey: 'test-only',
+      fetcher: async () => ({ ok: true, json: async () => ({
+        choices: [{ finish_reason: 'length', message: { content: null } }],
+      }) }),
+    }),
+    error => error.status === 502 && /output limit/.test(error.message),
+  );
 });
