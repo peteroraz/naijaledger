@@ -1,11 +1,13 @@
 # NaijaLedger
 
-**A source-backed reconciliation copilot for Nigerian SMEs.** Built for the Meta Global AI Developer Hackathon's “Build for Your World” theme. A business owner imports sales and bank CSVs, reviews deterministic match suggestions, and investigates missing settlements with Meta Muse Spark 1.3. A human decides every allocation.
+**A source-backed reconciliation copilot for Nigerian SMEs.** Built for the Meta Global AI Developer Hackathon's “Build for Your World” theme. A business owner can capture handwritten daybooks, scanned invoices, PDFs, Word files, voice notes, typed entries, or CSV exports; review deterministic match suggestions; and investigate missing settlements with Meta models. A human decides every import and allocation.
 
 ## What works
 
 - Firebase Google sign-in. Every API request verifies a Firebase ID token on the server. Firestore stores an isolated, persistent workspace under the verified user's UID.
 - First sign-in seeds a synthetic sample business. CSV imports and approvals are atomic Firestore transactions with version checks; a stale tab receives HTTP 409 instead of overwriting a later decision.
+- Meta Smart Intake accepts up to eight mixed sales sources at once: PNG/JPEG/WebP scans, PDF, DOCX, XLSX, TXT, recorded or uploaded audio, and typed natural-language entries. Muse Spark 1.3 extracts schema-constrained invoice candidates from documents and handwriting. Voice entries are converted to a safe 16 kHz WAV and transcribed with Muse Voice Transcribe before extraction. The original file bytes are never stored.
+- Extracted candidates remain in a persistent draft review queue. A person can edit dates, customer names, invoice IDs and NGN amounts, untick unsupported rows, and then commit only the reviewed records. Source type, filename, locator, confidence, SHA-256, model, and audit activity remain attached to every imported row.
 - Amounts use integer kobo. Exact-amount credits within 14 days are proposed only when there is no competing invoice. POS deductions, capital, loans, and unknown credits remain unresolved.
 - “Investigate with Meta” sends one selected invoice and up to 12 bank credits to Muse Spark 1.3. The model returns a constrained evidence brief. A second independent Muse pass reviews groundedness, while deterministic checks verify the schema, source fingerprint, citations, amounts, and decision boundary. The persisted verification receipt records attempts and requires explicit human sign-off. Neither model can approve a match or determine tax treatment.
 - The authenticated review pack downloads as a polished PDF summary and a complete Excel workbook. Both retain source hashes, decisions, unresolved rows, verification receipts, AI briefs, and audit activity for accountant review.
@@ -29,17 +31,23 @@ Invoices: `id,date,customer,amount`. Bank: `id,date,description,amount`. Dates a
 
 AI is an investigation aid. Its output is labeled unverified and deliberately constrained to low or medium confidence. Do not use it as a tax filing, accounting certification, or automatic classification.
 
+## Smart Intake formats and safety
+
+Smart Intake supports up to eight files, 15 MB per file and 40 MB combined. Supported sources are `.png`, `.jpg`, `.jpeg`, `.webp`, `.pdf`, `.docx`, `.xlsx`, `.txt`, `.wav`, `.mp3`, `.m4a`, `.ogg`, `.webm`, and `.aac`, plus typed text and an in-browser voice recorder. Audio requires FFmpeg in the runtime; the Docker image installs it.
+
+Files are processed only after the signed-in user clicks **Extract invoice candidates**. Raw bytes are held in memory for that request and are not written to Firestore. Firestore retains the bounded draft, short transcript/text preview when applicable, extracted fields, source fingerprints, and audit history. Document content is treated as untrusted data, so instructions inside an invoice cannot override the extraction policy. A document extraction never becomes a ledger row without the human commit checkpoint.
+
 ## Architecture
 
-`React/Vite → Firebase Authentication → Express (verified ID token) → Firestore per UID`
+`React/Vite → Firebase Authentication → Express (verified ID token) → Meta Smart Intake / deterministic reconciliation → Firestore per UID`
 
-The Express server alone calls Meta Model API. Firestore rules deny all browser reads and writes. The workspace document contains normalized CSV rows, approvals, briefs, source hashes, version, and a bounded audit log. A transaction reads the current version before each write. The Meta model receives only a small, explicit evidence selection when the user clicks investigate.
+The Express server alone calls Meta Model API. Firestore rules deny all browser reads and writes. The workspace document contains normalized source rows, an optional extraction draft, approvals, briefs, source hashes, version, and a bounded audit log. A transaction reads the current version before each write. Smart Intake uses Muse Spark 1.3 for images, PDFs and structured text, `mammoth` for local DOCX text extraction, and Muse Voice Transcribe for speech. The evidence lab still receives only a small, explicit evidence selection when the user clicks investigate.
 
 ## Remaining work before production or judging
 
 - Run the live workflow with a second Google account to document workspace isolation as part of the final test evidence.
 - Capture the production verification receipt, human sign-off, persistence after reload, and exported review pack in the final demo.
-- Add partial/split settlement allocations, POS fee evidence, document ingestion, finer role permissions, storage for raw evidence, and retention/deletion controls. Current exact matching intentionally leaves these cases unresolved.
+- Add partial/split settlement allocations, POS fee evidence, finer role permissions, optional encrypted raw-evidence storage, and retention/deletion controls. Current exact matching intentionally leaves these cases unresolved.
 - Test with realistic **synthetic** scenarios and record a concise demo showing ambiguity, human review, persistent reload, and the cited Meta brief.
 
 References: [Firebase ID token verification](https://firebase.google.com/docs/auth/admin/verify-id-tokens), [Firestore transactions](https://firebase.google.com/docs/firestore/manage-data/transactions), [Meta structured output](https://dev.meta.ai/docs/cookbook/structured-output), [hackathon page](https://events.cerebralvalley.ai/e/meta-ai-developer-hackathon).
