@@ -8,7 +8,7 @@
 - First sign-in seeds a synthetic sample business. CSV imports and approvals are atomic Firestore transactions with version checks; a stale tab receives HTTP 409 instead of overwriting a later decision.
 - Amounts use integer kobo. Exact-amount credits within 14 days are proposed only when there is no competing invoice. POS deductions, capital, loans, and unknown credits remain unresolved.
 - “Investigate with Meta” sends one selected invoice and up to 12 bank credits to Muse Spark 1.3. The model returns a constrained evidence brief. A second independent Muse pass reviews groundedness, while deterministic checks verify the schema, source fingerprint, citations, amounts, and decision boundary. The persisted verification receipt records attempts and requires explicit human sign-off. Neither model can approve a match or determine tax treatment.
-- A review pack downloads source hashes, decisions, unresolved rows, audit activity, and AI briefs as JSON for accountant review.
+- The authenticated review pack downloads as a polished PDF summary and a complete Excel workbook. Both retain source hashes, decisions, unresolved rows, verification receipts, AI briefs, and audit activity for accountant review.
 
 ## Run locally
 
