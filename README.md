@@ -2,9 +2,23 @@
 
 **A source-backed reconciliation copilot for Nigerian SMEs.** Built for the Meta Global AI Developer Hackathon's “Build for Your World” theme. A business owner can capture handwritten daybooks, scanned invoices, PDFs, Word files, voice notes, typed entries, or CSV exports; review deterministic match suggestions; and investigate missing settlements with Meta models. A human decides every import and allocation.
 
+## Judge Demo — no credentials required
+
+Open the [hosted NaijaLedger app](https://naijaledger-793831462989.europe-west1.run.app/) and choose **Enter Judge Demo**. Do not use or request a shared email or password. The demo creates an isolated anonymous Firebase workspace with synthetic Nigerian SME records while keeping the real Meta model integration active.
+
+Recommended five-minute path:
+
+1. Review the seeded sales, bank credits, deterministic match suggestions, and visible demo allowances.
+2. In **Meta Smart Intake**, paste `29 October 2026 — sold five cartons to Amina Stores for ₦42,500, invoice INV-JUDGE-001.`, select **Extract invoice candidates**, inspect the source provenance, edit if needed, and commit the reviewed row.
+3. Approve one exact match in **Reconciliation Desk**. This is always a human action; Meta cannot perform it.
+4. Investigate **INV-002** in **Meta Evidence Lab**. Inspect cited records, the five deterministic checks, independent Muse review, and the human checkpoint.
+5. Download the PDF and Excel review packs, then select **Reset sample** to restore the synthetic ledger. Reset deliberately does not refresh model allowances.
+
+Each anonymous workspace allows three Smart Intake extractions and five investigations. A separate bounded public traffic limit protects the hosted Meta integration. The banner always labels synthetic data and remaining calls; normal Google workspaces remain private and unchanged. The repository still runs independently using the setup below.
+
 ## What works
 
-- Firebase Google sign-in. Every API request verifies a Firebase ID token on the server. Firestore stores an isolated, persistent workspace under the verified user's UID.
+- Firebase Google sign-in plus anonymous Judge Demo sessions. Every API request verifies a Firebase ID token on the server. Firestore stores an isolated, persistent workspace under the verified user's UID.
 - First sign-in seeds a synthetic sample business. CSV imports and approvals are atomic Firestore transactions with version checks; a stale tab receives HTTP 409 instead of overwriting a later decision.
 - Meta Smart Intake accepts up to eight mixed sales sources at once: PNG/JPEG/WebP scans, PDF, DOCX, XLSX, TXT, recorded or uploaded audio, and typed natural-language entries. Muse Spark 1.3 extracts schema-constrained invoice candidates from documents and handwriting. Voice entries are converted to a safe 16 kHz WAV and transcribed with Muse Voice Transcribe before extraction. The original file bytes are never stored.
 - Extracted candidates remain in a persistent draft review queue. A person can edit dates, customer names, invoice IDs and NGN amounts, untick unsupported rows, and then commit only the reviewed records. Source type, filename, locator, confidence, SHA-256, model, and audit activity remain attached to every imported row.
@@ -16,7 +30,7 @@
 
 Requires **Node 22+**, a Firebase project, and a Google account. Install with `npm ci`.
 
-1. In Firebase Console, register a Web app and enable **Authentication → Sign-in method → Google**. Add `localhost` to authorized domains if needed. Create a Cloud Firestore database.
+1. In Firebase Console, register a Web app and enable **Authentication → Sign-in method → Google**. Also enable **Anonymous** if you want the credential-free Judge Demo path. Add `localhost` to authorized domains if needed. Create a Cloud Firestore database.
 2. Copy `.env.example` to `.env.local`. Set the four `VITE_FIREBASE_*` values from the Web app configuration. These are public browser identifiers, not an Admin SDK private key. Set `FIREBASE_PROJECT_ID` to the same project ID.
 3. Give the local backend Application Default Credentials: set `GOOGLE_APPLICATION_CREDENTIALS` to the absolute path of a service-account JSON file kept **outside** this repository. In Google Cloud hosting, use workload identity instead. Never paste or commit that JSON. The `firebase-admin` SDK needs access to Authentication and Firestore.
 4. Deploy `firestore.rules` to the Firebase project before loading any real records. The browser is denied direct Firestore access; only the server Admin SDK reads and writes data. Keep the server behind HTTPS in production.
@@ -36,6 +50,8 @@ AI is an investigation aid. Its output is labeled unverified and deliberately co
 Smart Intake supports up to eight files, 15 MB per file and 40 MB combined. Supported sources are `.png`, `.jpg`, `.jpeg`, `.webp`, `.pdf`, `.docx`, `.xlsx`, `.txt`, `.wav`, `.mp3`, `.m4a`, `.ogg`, `.webm`, and `.aac`, plus typed text and an in-browser voice recorder. Audio requires FFmpeg in the runtime; the Docker image installs it.
 
 Files are processed only after the signed-in user clicks **Extract invoice candidates**. Raw bytes are held in memory for that request and are not written to Firestore. Firestore retains the bounded draft, short transcript/text preview when applicable, extracted fields, source fingerprints, and audit history. Document content is treated as untrusted data, so instructions inside an invoice cannot override the extraction policy. A document extraction never becomes a ledger row without the human commit checkpoint.
+
+Judge Demo uses the same verified backend and per-UID Firestore isolation as a normal workspace. Model allowances are consumed in Firestore transactions and survive sample resets. A separate hourly in-memory limit by trusted proxy address bounds public demo model traffic. These controls are for a hackathon demonstration, not a general-purpose public multi-tenant billing system.
 
 ## Architecture
 
