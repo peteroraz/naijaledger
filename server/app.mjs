@@ -7,12 +7,16 @@ import { extractInvoiceIntake, INTAKE_LIMITS } from './intake.mjs';
 import { reconcile } from './reconcile.mjs';
 import { evidenceFor, investigateWithMeta } from './meta.mjs';
 import { buildReviewPdf, buildReviewWorkbook, createReviewPack } from './review-pack.mjs';
+import { seedWorkspace } from './store.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const view = state => ({ ...reconcile(state.invoices, state.bank, state.approved),
+export const DEMO_LIMITS = Object.freeze({ intake: 3, investigate: 5 });
+const view = (state, isDemo = false) => ({ ...reconcile(state.invoices, state.bank, state.approved),
   invoices: state.invoices, bank: state.bank, approved: state.approved,
   version: state.version, imports: state.imports, briefs: state.briefs || {}, intakeDraft: state.intakeDraft || null,
-  audit: state.audit || [], updatedAt: state.updatedAt });
+  audit: state.audit || [], updatedAt: state.updatedAt,
+  demo: { isDemo, limits: DEMO_LIMITS, usage: { intake: 0, investigate: 0, ...(state.demoUsage || {}) } },
+});
 const route = fn => (req, res, next) => Promise.resolve().then(() => fn(req, res, next)).catch(next);
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -55,6 +59,27 @@ function reviewedInvoiceRows(requested, draft, existing) {
 
 export function createApp({ verifyToken, store, investigate = investigateWithMeta, extractIntake = extractInvoiceIntake }) {
   const app = express();
+  app.set('trust proxy', 1);
+  const publicDemoBuckets = new Map();
+  const consumePublicDemoRequest = req => {
+    const key = String(req.ip || req.socket.remoteAddress || 'unknown').slice(0, 160);
+    const now = Date.now();
+    const existing = publicDemoBuckets.get(key);
+    const bucket = !existing || existing.resetAt <= now ? { count: 0, resetAt: now + 60 * 60 * 1000 } : existing;
+    if (bucket.count >= 20) {
+      const error = new Error('Public Judge Demo traffic limit reached. Please try again later.'); error.status = 429; throw error;
+    }
+    bucket.count += 1;
+    publicDemoBuckets.set(key, bucket);
+    if (publicDemoBuckets.size > 2_000) {
+      for (const [bucketKey, value] of publicDemoBuckets) if (value.resetAt <= now) publicDemoBuckets.delete(bucketKey);
+    }
+  };
+  const consumeDemoModelCall = async (req, kind) => {
+    if (!req.isAnonymous) return;
+    consumePublicDemoRequest(req);
+    await store.consumeDemoQuota(req.uid, kind, DEMO_LIMITS[kind]);
+  };
   app.disable('x-powered-by');
   app.use(express.json({ limit: '1mb' }));
   app.get('/firebase-config.js', (_req, res) => {
@@ -72,13 +97,33 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
   app.use('/api', route(async (req, res, next) => {
     const match = /^Bearer ([^\s]+)$/.exec(req.get('authorization') || '');
     if (!match) return res.status(401).json({ error: 'Sign in to continue' });
-    try { req.uid = await verifyToken(match[1]); next(); }
+    try {
+      const identity = await verifyToken(match[1]);
+      req.uid = typeof identity === 'string' ? identity : identity?.uid;
+      req.isAnonymous = typeof identity === 'object' && identity?.isAnonymous === true;
+      if (!req.uid) throw new Error('Invalid identity');
+      next();
+    }
     catch { res.status(401).json({ error: 'Session expired; sign in again' }); }
   }));
-  app.get('/api/workspace', route(async (req, res) => res.json(view(await store.get(req.uid)))));
+  app.get('/api/workspace', route(async (req, res) => res.json(view(await store.get(req.uid), req.isAnonymous))));
+  app.post('/api/demo/reset', route(async (req, res) => {
+    if (!req.isAnonymous) return res.status(403).json({ error: 'Reset sample is available only in Judge Demo' });
+    const state = await store.change(req.uid, req.body?.version, current => {
+      const resetAt = new Date().toISOString();
+      return {
+        ...seedWorkspace(),
+        demoUsage: current.demoUsage || { intake: 0, investigate: 0 },
+        audit: [{ action: 'demo-reset', at: resetAt }],
+        updatedAt: resetAt,
+      };
+    });
+    res.json(view(state, true));
+  }));
   app.post('/api/intake/extract', upload.array('files', INTAKE_LIMITS.files), route(async (req, res) => {
     const version = Number(req.body?.version);
     if (!Number.isInteger(version)) return res.status(400).json({ error: 'Workspace version is required' });
+    await consumeDemoModelCall(req, 'intake');
     const draft = await extractIntake(req.files || [], req.body?.text || '');
     const state = await store.change(req.uid, version, current => {
       current.intakeDraft = draft;
@@ -89,7 +134,7 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
       }].slice(-100);
       return current;
     });
-    res.json(view(state));
+    res.json(view(state, req.isAnonymous));
   }));
   app.post('/api/intake/commit', route(async (req, res) => {
     const { draftId, rows, version } = req.body || {};
@@ -111,7 +156,7 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
       current.intakeDraft = null;
       return current;
     });
-    res.json(view(state));
+    res.json(view(state, req.isAnonymous));
   }));
   app.post('/api/intake/discard', route(async (req, res) => {
     const { draftId, version } = req.body || {};
@@ -123,7 +168,7 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
       current.intakeDraft = null;
       return current;
     });
-    res.json(view(state));
+    res.json(view(state, req.isAnonymous));
   }));
   app.post('/api/import/:kind', route(async (req, res) => {
     const kind = req.params.kind;
@@ -137,7 +182,7 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
       current.audit = [...(current.audit || []), { action: 'imported', kind, rows: rows.length, sourceHash: current.imports[kind], at: new Date().toISOString() }].slice(-100);
       return current;
     });
-    res.json(view(state));
+    res.json(view(state, req.isAnonymous));
   }));
   app.post('/api/approvals', route(async (req, res) => {
     const { invoiceId, bankId, version } = req.body || {};
@@ -150,7 +195,7 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
       current.audit = [...(current.audit || []), { action: 'approved', invoiceId, bankId, by: req.uid, at: new Date().toISOString() }].slice(-100);
       return current;
     });
-    res.json(view(state));
+    res.json(view(state, req.isAnonymous));
   }));
   app.post('/api/investigate', route(async (req, res) => {
     const { invoiceId, version } = req.body || {};
@@ -158,9 +203,10 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
     const state = await store.get(req.uid);
     if (state.version !== version) return res.status(409).json({ error: 'Workspace changed; reload and review again' });
     const evidence = evidenceFor(state, invoiceId);
+    await consumeDemoModelCall(req, 'investigate');
     const brief = await investigate(evidence);
     const saved = await store.saveBrief(req.uid, version, invoiceId, brief);
-    res.json({ invoiceId, brief, workspace: view(saved) });
+    res.json({ invoiceId, brief, workspace: view(saved, req.isAnonymous) });
   }));
   app.post('/api/brief-reviews', route(async (req, res) => {
     const { invoiceId, sourceFingerprint, version } = req.body || {};
@@ -168,7 +214,7 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
       return res.status(400).json({ error: 'Select a current evidence brief' });
     }
     const state = await store.reviewBrief(req.uid, version, invoiceId, sourceFingerprint);
-    res.json(view(state));
+    res.json(view(state, req.isAnonymous));
   }));
   app.get('/api/handover', route(async (req, res) => {
     const state = await store.get(req.uid);

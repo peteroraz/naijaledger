@@ -26,13 +26,65 @@ function fakeFirestore() {
 
 async function serve(store, investigate, extractIntake) {
   const app = createApp({ store, investigate, ...(extractIntake ? { extractIntake } : {}), verifyToken: async token => {
+    if (token === 'judge') return { uid: 'judge', isAnonymous: true };
     if (!['alice', 'bob'].includes(token)) throw new Error('Invalid token');
-    return token;
+    return { uid: token, isAnonymous: false };
   } });
   const server = app.listen(0);
   await once(server, 'listening');
   return { server, url: `http://127.0.0.1:${server.address().port}` };
 }
+
+test('Judge Demo is isolated, bounded, resettable, and cannot refresh model allowances', async () => {
+  const store = createFirestoreStore(fakeFirestore());
+  const modelBrief = evidence => ({
+    summary: 'The closest supplied row may be a net settlement and still needs human verification.',
+    hypotheses: [], missingEvidence: ['Remittance advice'], model: 'muse-spark-1.3', status: 'unverified',
+    sourceFingerprint: evidence.sourceFingerprint, createdAt: new Date().toISOString(),
+    verification: {
+      status: 'checks_passed', checks: [],
+      modelReview: { model: 'muse-spark-1.3', verdict: 'supported', checkedClaims: 1, issues: [] },
+      attempts: { generation: 1, verifier: 1, maximum: 3 }, humanReview: { status: 'pending' },
+    },
+  });
+  const { server, url } = await serve(store, async evidence => modelBrief(evidence));
+  const request = async (user, path, body) => {
+    const response = await fetch(`${url}/api${path}`, {
+      method: body ? 'POST' : 'GET',
+      headers: { Authorization: `Bearer ${user}`, 'Content-Type': 'application/json' },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+    return { status: response.status, data: await response.json() };
+  };
+  try {
+    const initial = await request('judge', '/workspace');
+    assert.equal(initial.status, 200);
+    assert.equal(initial.data.demo.isDemo, true);
+    assert.deepEqual(initial.data.demo.limits, { intake: 3, investigate: 5 });
+    assert.deepEqual(initial.data.demo.usage, { intake: 0, investigate: 0 });
+
+    const approved = await request('judge', '/approvals', { invoiceId: 'INV-001', bankId: 'BNK-001', version: initial.data.version });
+    assert.equal(approved.status, 200);
+    assert.equal(approved.data.matches.length, 1);
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      const investigated = await request('judge', '/investigate', { invoiceId: 'INV-002', version: approved.data.version });
+      assert.equal(investigated.status, 200, JSON.stringify(investigated.data));
+      assert.equal(investigated.data.workspace.demo.usage.investigate, attempt);
+    }
+    const limited = await request('judge', '/investigate', { invoiceId: 'INV-002', version: approved.data.version });
+    assert.equal(limited.status, 429);
+    assert.match(limited.data.error, /Demo limit reached/);
+
+    const reset = await request('judge', '/demo/reset', { version: approved.data.version });
+    assert.equal(reset.status, 200);
+    assert.equal(reset.data.invoices.length, 6);
+    assert.equal(reset.data.matches.length, 0);
+    assert.equal(reset.data.audit.at(-1).action, 'demo-reset');
+    assert.equal(reset.data.demo.usage.investigate, 5, 'reset must preserve the model allowance');
+    assert.equal((await request('alice', '/demo/reset', { version: 0 })).status, 403);
+    assert.equal((await request('alice', '/workspace')).data.demo.isDemo, false);
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});
 
 test('auth, user isolation, persistence across server restarts, and stale writes', async () => {
   const db = fakeFirestore();

@@ -8,7 +8,13 @@ export function firebaseServices() {
   if (!projectId) throw new Error('FIREBASE_PROJECT_ID is required');
   initializeApp({ credential: applicationDefault(), projectId });
   return {
-    verifyToken: async token => (await getAuth().verifyIdToken(token)).uid,
+    verifyToken: async token => {
+      const decoded = await getAuth().verifyIdToken(token);
+      return {
+        uid: decoded.uid,
+        isAnonymous: decoded.firebase?.sign_in_provider === 'anonymous',
+      };
+    },
     store: createFirestoreStore(getFirestore()),
   };
 }

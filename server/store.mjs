@@ -51,6 +51,25 @@ export function createFirestoreStore(db) {
         return next;
       });
     },
+    async consumeDemoQuota(uid, kind, limit) {
+      if (!['intake', 'investigate'].includes(kind) || !Number.isInteger(limit) || limit < 1) throw new Error('Invalid demo quota');
+      return db.runTransaction(async tx => {
+        const doc = ref(uid);
+        const snap = await tx.get(doc);
+        const state = snap.exists ? snap.data() : seedWorkspace();
+        const usage = { intake: 0, investigate: 0, ...(state.demoUsage || {}) };
+        if (usage[kind] >= limit) {
+          const label = kind === 'intake' ? 'Smart Intake extractions' : 'Meta investigations';
+          const error = new Error(`Judge Demo limit reached for ${label}. Resetting the sample does not reset model allowances.`);
+          error.status = 429;
+          throw error;
+        }
+        usage[kind] += 1;
+        state.demoUsage = usage;
+        tx.set(doc, state);
+        return usage;
+      });
+    },
     async saveBrief(uid, expectedVersion, invoiceId, brief) {
       return db.runTransaction(async tx => {
         const doc = ref(uid);
