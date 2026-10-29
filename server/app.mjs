@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { parseCsv, sha256 } from './csv.mjs';
 import { reconcile } from './reconcile.mjs';
 import { evidenceFor, investigateWithMeta } from './meta.mjs';
+import { buildReviewPdf, buildReviewWorkbook, createReviewPack } from './review-pack.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const view = state => ({ ...reconcile(state.invoices, state.bank, state.approved),
@@ -80,14 +81,29 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
   }));
   app.get('/api/handover', route(async (req, res) => {
     const state = await store.get(req.uid);
-    const report = {
-      title: 'NaijaLedger review pack', generatedAt: new Date().toISOString(),
-      status: 'Human review required; not a tax filing or accounting certification',
-      sourceHashes: state.imports, workspaceVersion: state.version,
-      ...view(state),
-    };
+    const report = createReviewPack(state);
     res.set('Content-Disposition', 'attachment; filename="naijaledger-review-pack.json"');
     res.json(report);
+  }));
+  app.get('/api/handover.pdf', route(async (req, res) => {
+    const report = createReviewPack(await store.get(req.uid));
+    const file = await buildReviewPdf(report);
+    res.set({
+      'Cache-Control': 'no-store',
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': 'attachment; filename="naijaledger-review-pack.pdf"',
+      'Content-Length': String(file.length),
+    }).send(file);
+  }));
+  app.get('/api/handover.xlsx', route(async (req, res) => {
+    const report = createReviewPack(await store.get(req.uid));
+    const file = await buildReviewWorkbook(report);
+    res.set({
+      'Cache-Control': 'no-store',
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'Content-Disposition': 'attachment; filename="naijaledger-review-pack.xlsx"',
+      'Content-Length': String(file.length),
+    }).send(file);
   }));
   app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found' }));
   app.use(express.static(join(here, '../dist')));
