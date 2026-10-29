@@ -38,6 +38,19 @@ async function api<T>(user: User, path: string, options: RequestInit = {}): Prom
   return data as T;
 }
 
+async function downloadApiFile(user: User, path: string, filename: string) {
+  const token = await user.getIdToken();
+  const response = await fetch(`/api${path}`, { headers: { Authorization: `Bearer ${token}` } });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || `HTTP ${response.status}`);
+  }
+  const url = URL.createObjectURL(await response.blob());
+  const link = document.createElement('a');
+  link.href = url; link.download = filename; document.body.appendChild(link); link.click(); link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 function Brand() {
   return <div className="brand"><div className="icon">₦</div><div><b>NaijaLedger</b><small>Clarity for every naira</small></div></div>;
 }
@@ -134,14 +147,10 @@ function Desk({ user }: { user: User }) {
     catch (e) { setError((e as Error).message); void refresh(); }
     finally { setBusy(''); }
   }
-  async function downloadPack() {
-    setBusy('export'); setError('');
+  async function downloadPack(format: 'pdf' | 'xlsx') {
+    setBusy(`export-${format}`); setError('');
     try {
-      const report = await api<Record<string, unknown>>(user, '/handover');
-      const link = document.createElement('a');
-      const url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' }));
-      link.href = url; link.download = 'naijaledger-review-pack.json'; link.click();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      await downloadApiFile(user, `/handover.${format}`, `naijaledger-review-pack.${format}`);
     } catch (e) { setError((e as Error).message); }
     finally { setBusy(''); }
   }
@@ -157,7 +166,7 @@ function Desk({ user }: { user: User }) {
       <section className="card"><div className="sectionhead"><div><p className="eyebrow">02 · RECONCILIATION DESK</p><h2>Suggested matches</h2><p>Exact amount and date are suggestions. Check source rows before approving.</p></div><span className="pill">{data.proposals.length} to review</span></div><div className="list">{data.proposals.map(p => <div className="pair" key={p.invoiceId}><div><b>{p.invoiceId} <span>↔</span> {p.bankId}</b><p>{row(p.invoiceId, data.invoices)?.customer} · Invoice row {row(p.invoiceId, data.invoices)?.sourceRow} · Bank row {row(p.bankId, data.bank)?.sourceRow}</p><small>{p.reason}</small></div><div className="pair-action"><strong>{money(p.amountKobo)}</strong><button disabled={!!busy} onClick={() => void approve(p)}>{busy === p.invoiceId ? 'Saving…' : 'Approve match'}</button></div></div>)}{data.proposals.length === 0 && <p className="empty">No exact match proposals to review.</p>}</div></section>
       <section className="card"><div className="sectionhead"><div><p className="eyebrow">03 · META EVIDENCE LAB</p><h2>Unresolved invoices</h2><p>Explore possible explanations with cited records, independent verification, and a human checkpoint.</p></div></div><div className="list">{data.unresolvedInvoices.map(inv => <div className="unresolved" key={inv.id}><div className="unresolved-head"><div><b>{inv.id} · {inv.customer}</b><p>{inv.date} · Source row {inv.sourceRow}</p></div><strong>{money(inv.amountKobo)}</strong><button disabled={!!busy} onClick={() => void investigate(inv.id)}>{busy === inv.id ? 'Investigating + verifying…' : data.briefs[inv.id] ? 'Regenerate brief' : 'Investigate with Meta'}</button></div><p className="consent-note">This sends this invoice and up to 12 relevant bank credit rows to Meta Model API. A second independent Muse pass checks the resulting claims.</p>{data.briefs[inv.id] && <EvidenceBrief brief={data.briefs[inv.id]} bank={data.bank} onReview={() => void reviewBrief(inv.id, data.briefs[inv.id])} reviewing={busy === `review-${inv.id}`} />}</div>)}{data.unresolvedInvoices.length === 0 && <p className="empty">No unresolved invoices.</p>}</div></section>
       <section className="card"><div className="sectionhead"><div><p className="eyebrow">04 · BANK REVIEW</p><h2>Unresolved bank entries</h2><p>Review fees, other income, capital, loans and unmatched customer payments.</p></div></div><div className="tablewrap"><table><thead><tr><th>Source</th><th>Date</th><th>Description</th><th>Amount</th></tr></thead><tbody>{data.unresolvedBank.map(b => <tr key={b.id}><td>{b.id} <small>row {b.sourceRow}</small></td><td>{b.date}</td><td>{b.description}</td><td>{money(b.amountKobo)}</td></tr>)}</tbody></table></div></section>
-      <section className="card handover"><div className="sectionhead"><div><p className="eyebrow">05 · REVIEW TRAIL</p><h2>A clear handover</h2><p>Export source hashes, decisions, verification receipts, unresolved items, and AI briefs for accountant review.</p></div><button disabled={!!busy} onClick={() => void downloadPack()}>{busy === 'export' ? 'Preparing…' : 'Download review pack'}</button></div><div className="activity">{data.audit.slice(-5).reverse().map((event, index) => <div key={`${event.at}-${index}`}><span className="activity-dot"/><strong>{event.action === 'imported' ? `Imported ${event.rows} ${event.kind} rows` : event.action === 'approved' ? `Approved ${event.invoiceId} ↔ ${event.bankId}` : event.action === 'brief-reviewed' ? `Human reviewed ${event.invoiceId} evidence brief` : `Investigated and verified ${event.invoiceId}`}</strong><time>{new Date(event.at).toLocaleString('en-NG')}</time></div>)}{data.audit.length === 0 && <p className="empty">Your review activity will appear here.</p>}</div></section>
+      <section className="card handover"><div className="sectionhead"><div><p className="eyebrow">05 · REVIEW TRAIL</p><h2>A clear handover</h2><p>Download a visual PDF summary or a complete Excel workbook with source hashes, decisions, verification receipts, unresolved items, AI briefs, and audit activity.</p></div><div className="export-actions"><button className="quiet export-pdf" disabled={!!busy} onClick={() => void downloadPack('pdf')}>{busy === 'export-pdf' ? 'Preparing PDF…' : 'Download PDF'}</button><button disabled={!!busy} onClick={() => void downloadPack('xlsx')}>{busy === 'export-xlsx' ? 'Preparing Excel…' : 'Download Excel'}</button></div></div><div className="activity">{data.audit.slice(-5).reverse().map((event, index) => <div key={`${event.at}-${index}`}><span className="activity-dot"/><strong>{event.action === 'imported' ? `Imported ${event.rows} ${event.kind} rows` : event.action === 'approved' ? `Approved ${event.invoiceId} ↔ ${event.bankId}` : event.action === 'brief-reviewed' ? `Human reviewed ${event.invoiceId} evidence brief` : `Investigated and verified ${event.invoiceId}`}</strong><time>{new Date(event.at).toLocaleString('en-NG')}</time></div>)}{data.audit.length === 0 && <p className="empty">Your review activity will appear here.</p>}</div></section>
     </>}
     <footer>NaijaLedger beta · Human approval required · No tax filing</footer>
   </main>;
