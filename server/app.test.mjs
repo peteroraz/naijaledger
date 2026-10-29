@@ -24,8 +24,8 @@ function fakeFirestore() {
   };
 }
 
-async function serve(store, investigate) {
-  const app = createApp({ store, investigate, verifyToken: async token => {
+async function serve(store, investigate, extractIntake) {
+  const app = createApp({ store, investigate, ...(extractIntake ? { extractIntake } : {}), verifyToken: async token => {
     if (!['alice', 'bob'].includes(token)) throw new Error('Invalid token');
     return token;
   } });
@@ -67,6 +67,52 @@ test('auth, user isolation, persistence across server restarts, and stale writes
     ({ server, url } = await serve(createFirestoreStore(db), async () => { throw new Error('Model not used'); }));
     assert.equal((await request('alice', '/workspace')).data.matches.length, 1);
     assert.equal((await request('bob', '/workspace')).data.matches.length, 0);
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});
+
+test('multisource extraction stays draft-only until reviewed rows are committed', async () => {
+  const store = createFirestoreStore(fakeFirestore());
+  const draft = {
+    id: 'intake-test', createdAt: '2026-10-29T12:00:00.000Z', model: 'muse-spark-1.3', voiceModel: 'muse-voice-transcribe-1.0',
+    sourceFingerprint: 'a'.repeat(64), status: 'awaiting_human_review',
+    sources: [{ id: 'source-1', name: 'daybook.jpg', type: 'image', mimeType: 'image/jpeg', sha256: 'b'.repeat(64), size: 10, status: 'extracted', entryCount: 1 }],
+    candidates: [{
+      draftId: 'source-1-1', invoiceId: 'DAY-001', date: '2026-10-29', customer: 'Amina Stores', amountKobo: 4250000,
+      description: 'Daybook sale', confidence: 'medium', sourceId: 'source-1', sourceLabel: 'daybook.jpg', sourceType: 'image',
+      sourceHash: 'b'.repeat(64), sourceLocator: 'row 1', warnings: [], extractionModel: 'muse-spark-1.3',
+    }],
+  };
+  const { server, url } = await serve(store, async () => { throw new Error('Not used'); }, async files => {
+    assert.equal(files.length, 1);
+    assert.equal(files[0].originalname, 'daybook.jpg');
+    return structuredClone(draft);
+  });
+  try {
+    const initial = await (await fetch(`${url}/api/workspace`, { headers: { Authorization: 'Bearer alice' } })).json();
+    const form = new FormData();
+    form.append('version', String(initial.version));
+    form.append('text', '');
+    form.append('files', new Blob([Buffer.from('fake image')], { type: 'image/jpeg' }), 'daybook.jpg');
+    const extractedResponse = await fetch(`${url}/api/intake/extract`, { method: 'POST', headers: { Authorization: 'Bearer alice' }, body: form });
+    assert.equal(extractedResponse.status, 200);
+    const extracted = await extractedResponse.json();
+    assert.equal(extracted.invoices.length, 6, 'draft extraction must not alter the ledger');
+    assert.equal(extracted.intakeDraft.candidates.length, 1);
+    assert.equal(extracted.audit.at(-1).action, 'intake-extracted');
+
+    const candidate = { ...extracted.intakeDraft.candidates[0], customer: 'Amina Stores Ltd' };
+    const committedResponse = await fetch(`${url}/api/intake/commit`, {
+      method: 'POST', headers: { Authorization: 'Bearer alice', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ draftId: extracted.intakeDraft.id, rows: [candidate], version: extracted.version }),
+    });
+    assert.equal(committedResponse.status, 200);
+    const committed = await committedResponse.json();
+    assert.equal(committed.invoices.length, 7);
+    assert.equal(committed.invoices.at(-1).customer, 'Amina Stores Ltd');
+    assert.equal(committed.invoices.at(-1).sourceName, 'daybook.jpg');
+    assert.equal(committed.invoices.at(-1).sourceHash, 'b'.repeat(64));
+    assert.equal(committed.intakeDraft, null);
+    assert.equal(committed.audit.at(-1).action, 'intake-committed');
   } finally { await new Promise(resolve => server.close(resolve)); }
 });
 

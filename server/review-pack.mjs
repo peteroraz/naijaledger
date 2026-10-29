@@ -157,11 +157,21 @@ export async function buildReviewWorkbook(report) {
     { header: partyHeader, key: partyKey }, { header: 'Amount (NGN)', key: 'amount', style: { numFmt: MONEY_FORMAT } },
     { header: 'Source row', key: 'sourceRow' },
   ];
-  const invoiceRows = rows => rows.map(row => ({ id: row.id, date: dateValue(row.date), customer: row.customer, amount: amount(row.amountKobo), sourceRow: row.sourceRow }));
+  const invoiceColumns = [
+    ...sourceColumns('Customer', 'customer'),
+    { header: 'Source name', key: 'sourceName' }, { header: 'Source type', key: 'sourceType' },
+    { header: 'Source locator', key: 'sourceLocator' }, { header: 'Extraction confidence', key: 'confidence' },
+    { header: 'Source SHA-256', key: 'sourceHash' }, { header: 'Extraction model', key: 'extractionModel' },
+  ];
+  const invoiceRows = rows => rows.map(row => ({
+    id: row.id, date: dateValue(row.date), customer: row.customer, amount: amount(row.amountKobo), sourceRow: row.sourceRow,
+    sourceName: row.sourceName || 'CSV import', sourceType: row.sourceType || 'csv', sourceLocator: row.sourceLocator || `row ${row.sourceRow}`,
+    confidence: row.confidence || 'source supplied', sourceHash: row.sourceHash || report.sourceHashes?.invoices || '', extractionModel: row.extractionModel || 'Not applicable',
+  }));
   const bankRows = rows => rows.map(row => ({ id: row.id, date: dateValue(row.date), description: row.description, amount: amount(row.amountKobo), sourceRow: row.sourceRow }));
-  addRowsSheet(workbook, 'Unresolved Invoices', sourceColumns('Customer', 'customer'), invoiceRows(report.unresolvedInvoices), { A: 15, B: 15, C: 32, D: 18, E: 13 });
+  addRowsSheet(workbook, 'Unresolved Invoices', invoiceColumns, invoiceRows(report.unresolvedInvoices), { A: 15, B: 15, C: 32, D: 18, E: 13, F: 30, G: 15, H: 20, I: 20, J: 68, K: 24 });
   addRowsSheet(workbook, 'Unresolved Bank', sourceColumns('Description', 'description'), bankRows(report.unresolvedBank), { A: 15, B: 15, C: 48, D: 18, E: 13 });
-  addRowsSheet(workbook, 'Sales Invoices', sourceColumns('Customer', 'customer'), invoiceRows(report.invoices), { A: 15, B: 15, C: 32, D: 18, E: 13 });
+  addRowsSheet(workbook, 'Sales Invoices', invoiceColumns, invoiceRows(report.invoices), { A: 15, B: 15, C: 32, D: 18, E: 13, F: 30, G: 15, H: 20, I: 20, J: 68, K: 24 });
   addRowsSheet(workbook, 'Bank Transactions', sourceColumns('Description', 'description'), bankRows(report.bank), { A: 15, B: 15, C: 48, D: 18, E: 13 });
 
   const briefRows = Object.entries(report.briefs).map(([invoiceId, brief]) => ({

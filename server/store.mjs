@@ -10,7 +10,7 @@ export function seedWorkspace() {
   return {
     invoices: parseCsv(samples.invoices, 'invoices'),
     bank: parseCsv(samples.bank, 'bank'),
-    approved: [], briefs: {}, audit: [], version: 0,
+    approved: [], briefs: {}, intakeDraft: null, audit: [], version: 0,
     imports: { invoices: sha256(samples.invoices), bank: sha256(samples.bank) },
     updatedAt: new Date().toISOString(),
   };
