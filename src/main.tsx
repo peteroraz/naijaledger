@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signOut, type User } from 'firebase/auth';
+import { GoogleAuthProvider, onAuthStateChanged, signInAnonymously, signInWithPopup, signOut, type User } from 'firebase/auth';
 import { auth, firebaseReady } from './firebase';
 import './style.css';
 
@@ -36,6 +36,7 @@ type Workspace = {
   totals: { invoicedKobo: number; bankCreditsKobo: number; approvedKobo: number };
   version: number; imports: Record<string, string>; briefs: Record<string, Brief>; intakeDraft: IntakeDraft | null; updatedAt: string;
   audit: { action: string; kind?: string; rows?: number; sources?: number; invoiceId?: string; bankId?: string; at: string }[];
+  demo: { isDemo: boolean; limits: { intake: number; investigate: number }; usage: { intake: number; investigate: number } };
 };
 const money = (n: number) => new Intl.NumberFormat('en-NG', { style: 'currency', currency: 'NGN' }).format(n / 100);
 const json = (body: unknown): RequestInit => ({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -69,6 +70,7 @@ function activityText(event: Workspace['audit'][number]) {
   if (event.action === 'intake-extracted') return `Meta extracted ${event.rows} candidates from ${event.sources} sources`;
   if (event.action === 'intake-committed') return `Added ${event.rows} human-reviewed invoices`;
   if (event.action === 'intake-discarded') return 'Discarded a document extraction draft';
+  if (event.action === 'demo-reset') return 'Reset the Judge Demo sample workspace';
   if (event.action === 'approved') return `Approved ${event.invoiceId} ↔ ${event.bankId}`;
   if (event.action === 'brief-reviewed') return `Human reviewed ${event.invoiceId} evidence brief`;
   return `Investigated and verified ${event.invoiceId}`;
@@ -80,11 +82,22 @@ function Brand() {
 
 function Welcome() {
   const [error, setError] = useState('');
+  const [busy, setBusy] = useState('');
   async function login() {
     if (!auth) return;
-    setError('');
+    setError(''); setBusy('google');
     try { await signInWithPopup(auth, new GoogleAuthProvider()); }
     catch (e) { setError((e as Error).message); }
+    finally { setBusy(''); }
+  }
+  async function enterDemo() {
+    if (!auth) return;
+    setError(''); setBusy('demo');
+    try { await signInAnonymously(auth); }
+    catch (e) {
+      const message = (e as Error).message;
+      setError(message.includes('operation-not-allowed') ? 'Judge Demo is awaiting Anonymous sign-in activation in Firebase.' : message);
+    } finally { setBusy(''); }
   }
   return <main className="welcome">
     <header><Brand /><span className="tag">Private workspace · Beta</span></header>
@@ -97,10 +110,10 @@ function Welcome() {
       <section className="welcome-card"><div className="welcome-mark">₦</div><p className="eyebrow">YOUR SECURE SPACE</p>
         <h2>Start with a sample business.</h2>
         <p>We’ll load synthetic sales and bank records into your own persistent workspace. Your approvals and AI briefs remain available after you return.</p>
-        {firebaseReady ? <button className="primary-large" onClick={() => void login()}>Continue with Google <span>→</span></button>
+        {firebaseReady ? <><button className="primary-large" disabled={!!busy} onClick={() => void login()}>{busy === 'google' ? 'Opening Google…' : 'Continue with Google'} <span>→</span></button><div className="login-divider"><span>or</span></div><button className="judge-entry" disabled={!!busy} onClick={() => void enterDemo()}><span className="judge-spark">✦</span><span><b>{busy === 'demo' ? 'Preparing Judge Demo…' : 'Enter Judge Demo'}</b><small>No account · synthetic records · live Meta models</small></span><i>→</i></button></>
           : <div className="setup-note" role="status">Firebase is not configured yet. Add the web app values in <code>.env.local</code>, then restart Vite. See README setup.</div>}
         {error && <div className="error" role="alert">{error}</div>}
-        <small>Financial data is sent to Meta only when you select “Investigate with Meta”.</small>
+        <small>Normal workspaces stay private. Judge Demo is isolated and uses synthetic records with bounded model calls.</small>
       </section>
     </div>
     <footer>NaijaLedger · A human reviews every allocation</footer>
@@ -250,6 +263,13 @@ function Desk({ user }: { user: User }) {
     catch (e) { setError((e as Error).message); void refresh(); }
     finally { setBusy(''); }
   }
+  async function resetDemo() {
+    if (!data) return;
+    setBusy('demo-reset'); setError('');
+    try { setData(await api<Workspace>(user, '/demo/reset', json({ version: data.version }))); }
+    catch (e) { setError((e as Error).message); void refresh(); }
+    finally { setBusy(''); }
+  }
   async function downloadPack(format: 'pdf' | 'xlsx') {
     setBusy(`export-${format}`); setError('');
     try {
@@ -259,11 +279,17 @@ function Desk({ user }: { user: User }) {
   }
   const row = (id: string, items: Row[]) => items.find(x => x.id === id);
   return <main>
-    <header><Brand /><div className="account"><span>{user.displayName || user.email || 'Workspace'}</span><button className="quiet" onClick={() => auth && void signOut(auth)}>Sign out</button></div></header>
+    <header><Brand /><div className="account"><span>{user.isAnonymous ? 'Judge Demo' : user.displayName || user.email || 'Workspace'}</span><button className="quiet" onClick={() => auth && void signOut(auth)}>{user.isAnonymous ? 'Exit demo' : 'Sign out'}</button></div></header>
     <section className="hero"><div><p className="eyebrow">SALES → BANK → EVIDENCE</p><h1>Know what settled.<br /><span>Know what needs review.</span></h1><p>Import source records, approve exact matches, and use Meta AI to investigate what remains. Your workspace saves as you go.</p></div><div className="hero-note"><strong>Review first</strong><p>Amounts and dates create proposals. Fees, deductions, owner funds and loans remain unresolved until you review supporting evidence.</p><small>Private Firebase workspace</small></div></section>
     {error && <div role="alert" className="error">{error}<button onClick={() => setError('')}>Dismiss</button></div>}
     {!data && !error && <p role="status" className="loading">Loading your workspace…</p>}
     {data && <>
+      {data.demo.isDemo && <section className="demo-banner" aria-label="Judge Demo status">
+        <div className="demo-emblem">✦</div>
+        <div><small>JUDGE DEMO · ISOLATED SESSION</small><strong>Live Meta models. Synthetic business records.</strong><p>Nothing here belongs to a real business. Human review is still required.</p></div>
+        <div className="demo-allowances"><span><b>{Math.max(0, data.demo.limits.intake - data.demo.usage.intake)}</b> Smart Intake calls left</span><span><b>{Math.max(0, data.demo.limits.investigate - data.demo.usage.investigate)}</b> investigations left</span></div>
+        <button className="quiet" disabled={!!busy} onClick={() => void resetDemo()}>{busy === 'demo-reset' ? 'Resetting…' : 'Reset sample'}</button>
+      </section>}
       <section className="stats"><article><small>Invoices</small><b>{money(data.totals.invoicedKobo)}</b><span>{data.invoices.length} sales records</span></article><article><small>Bank credits</small><b>{money(data.totals.bankCreditsKobo)}</b><span>Includes funds needing classification</span></article><article><small>Approved matches</small><b>{money(data.totals.approvedKobo)}</b><span>{data.matches.length} reviewed allocations</span></article><article><small>Needs investigation</small><b>{data.unresolvedInvoices.length}</b><span>Invoices without a simple match</span></article></section>
       <section className="card smart-intake">
         <div className="sectionhead"><div><p className="eyebrow">01 · META SMART INTAKE</p><h2>Turn messy records into reviewable invoices</h2><p>Upload several sources at once, dictate a sale, or type it naturally. Nothing enters the ledger until you confirm it.</p></div><span className="pill">Human-controlled import</span></div>
@@ -275,7 +301,7 @@ function Desk({ user }: { user: User }) {
           </div>
           <div className="typed-entry"><label htmlFor="typed-sales-entry"><strong>Type or paste a sales entry</strong><span>Example: “29 Oct 2026 — sold 20 bags to Bola Foods for ₦80,000, invoice INV-002.”</span></label><textarea id="typed-sales-entry" value={intakeText} disabled={!!busy} maxLength={20000} onChange={event => setIntakeText(event.target.value)} placeholder="Paste notes, copied messages, or several sales entries here…"/><small>{intakeText.length.toLocaleString()} / 20,000 characters</small></div>
         </div>
-        <div className="intake-run"><p><strong>Meta processing:</strong> Muse Spark reads documents and structures entries. Voice notes are transcribed with Muse Voice first. Source hashes and confidence stay attached to every candidate.</p><button disabled={!!busy || (!intakeFiles.length && !intakeText.trim())} onClick={() => void analyzeIntake()}>{busy === 'intake-analyze' ? `Reading ${intakeFiles.length + (intakeText.trim() ? 1 : 0)} source${intakeFiles.length + (intakeText.trim() ? 1 : 0) === 1 ? '' : 's'}…` : 'Extract invoice candidates'}</button></div>
+        <div className="intake-run"><p><strong>Meta processing:</strong> Muse Spark reads documents and structures entries. Voice notes are transcribed with Muse Voice first. Source hashes and confidence stay attached to every candidate.</p><button disabled={!!busy || (!intakeFiles.length && !intakeText.trim()) || (data.demo.isDemo && data.demo.usage.intake >= data.demo.limits.intake)} onClick={() => void analyzeIntake()}>{busy === 'intake-analyze' ? `Reading ${intakeFiles.length + (intakeText.trim() ? 1 : 0)} source${intakeFiles.length + (intakeText.trim() ? 1 : 0) === 1 ? '' : 's'}…` : data.demo.isDemo && data.demo.usage.intake >= data.demo.limits.intake ? 'Demo extraction limit reached' : 'Extract invoice candidates'}</button></div>
         {data.intakeDraft && <section className="intake-review" aria-label="Extracted invoice review queue">
           <div className="review-banner"><div><small>REVIEW QUEUE · {new Date(data.intakeDraft.createdAt).toLocaleString('en-NG')}</small><h3>{data.intakeDraft.candidates.length} invoice candidate{data.intakeDraft.candidates.length === 1 ? '' : 's'} from {data.intakeDraft.sources.length} source{data.intakeDraft.sources.length === 1 ? '' : 's'}</h3><p>Correct uncertain fields, untick anything that is not a sale, then add only the reviewed rows.</p></div><span>{selectedDrafts.size} selected</span></div>
           <div className="source-strip">{data.intakeDraft.sources.map(source => <article className={source.status} key={source.id}><div><b>{source.status === 'extracted' ? '✓' : '!'} {source.name}</b><small>{source.type} · {source.sha256.slice(0, 10)}…</small></div><span>{source.status === 'extracted' ? `${source.entryCount} found` : 'Could not read'}</span>{source.status === 'failed' && <p>{source.error}</p>}{source.summary && <p>{source.summary}</p>}</article>)}</div>
@@ -286,7 +312,7 @@ function Desk({ user }: { user: User }) {
       </section>
       <section className="card imports csv-lane"><div className="sectionhead"><div><p className="eyebrow">01B · CSV FAST LANE</p><h2>Import structured records</h2><p>Use CSV when your sales system or bank already exports clean rows.</p></div><span className="pill">Saved workspace</span></div><div className="filegrid">{(['invoices', 'bank'] as const).map(kind => <label className="drop" key={kind}><strong>{kind === 'invoices' ? 'Sales invoices' : 'Bank transactions'}</strong><span>{kind === 'invoices' ? 'id, date, customer, amount' : 'id, date, description, amount'}</span><input aria-label={`Upload ${kind} CSV`} type="file" accept=".csv,text/csv" disabled={!!busy} onChange={e => { void importFile(kind, e.target.files?.[0]); e.target.value = ''; }} /><em>{busy === kind ? 'Importing…' : 'Choose CSV file'}</em><small>{data[kind].length} rows · Source SHA-256 {data.imports[kind]?.slice(0, 12)}…</small></label>)}</div><p className="fine">Importing either file resets approvals and AI briefs so decisions never silently carry over to new records.</p></section>
       <section className="card"><div className="sectionhead"><div><p className="eyebrow">02 · RECONCILIATION DESK</p><h2>Suggested matches</h2><p>Exact amount and date are suggestions. Check source rows before approving.</p></div><span className="pill">{data.proposals.length} to review</span></div><div className="list">{data.proposals.map(p => <div className="pair" key={p.invoiceId}><div><b>{p.invoiceId} <span>↔</span> {p.bankId}</b><p>{row(p.invoiceId, data.invoices)?.customer} · Invoice row {row(p.invoiceId, data.invoices)?.sourceRow} · Bank row {row(p.bankId, data.bank)?.sourceRow}</p><small>{p.reason}</small></div><div className="pair-action"><strong>{money(p.amountKobo)}</strong><button disabled={!!busy} onClick={() => void approve(p)}>{busy === p.invoiceId ? 'Saving…' : 'Approve match'}</button></div></div>)}{data.proposals.length === 0 && <p className="empty">No exact match proposals to review.</p>}</div></section>
-      <section className="card"><div className="sectionhead"><div><p className="eyebrow">03 · META EVIDENCE LAB</p><h2>Unresolved invoices</h2><p>Explore possible explanations with cited records, independent verification, and a human checkpoint.</p></div></div><div className="list">{data.unresolvedInvoices.map(inv => <div className="unresolved" key={inv.id}><div className="unresolved-head"><div><b>{inv.id} · {inv.customer}</b><p>{inv.date} · Source row {inv.sourceRow}</p></div><strong>{money(inv.amountKobo)}</strong><button disabled={!!busy} onClick={() => void investigate(inv.id)}>{busy === inv.id ? 'Investigating + verifying…' : data.briefs[inv.id] ? 'Regenerate brief' : 'Investigate with Meta'}</button></div><p className="consent-note">This sends this invoice and up to 12 relevant bank credit rows to Meta Model API. A second independent Muse pass checks the resulting claims.</p>{data.briefs[inv.id] && <EvidenceBrief brief={data.briefs[inv.id]} bank={data.bank} onReview={() => void reviewBrief(inv.id, data.briefs[inv.id])} reviewing={busy === `review-${inv.id}`} />}</div>)}{data.unresolvedInvoices.length === 0 && <p className="empty">No unresolved invoices.</p>}</div></section>
+      <section className="card"><div className="sectionhead"><div><p className="eyebrow">03 · META EVIDENCE LAB</p><h2>Unresolved invoices</h2><p>Explore possible explanations with cited records, independent verification, and a human checkpoint.</p></div></div><div className="list">{data.unresolvedInvoices.map(inv => <div className="unresolved" key={inv.id}><div className="unresolved-head"><div><b>{inv.id} · {inv.customer}</b><p>{inv.date} · Source row {inv.sourceRow}</p></div><strong>{money(inv.amountKobo)}</strong><button disabled={!!busy || (data.demo.isDemo && data.demo.usage.investigate >= data.demo.limits.investigate)} onClick={() => void investigate(inv.id)}>{busy === inv.id ? 'Investigating + verifying…' : data.demo.isDemo && data.demo.usage.investigate >= data.demo.limits.investigate ? 'Demo limit reached' : data.briefs[inv.id] ? 'Regenerate brief' : 'Investigate with Meta'}</button></div><p className="consent-note">This sends this invoice and up to 12 relevant bank credit rows to Meta Model API. A second independent Muse pass checks the resulting claims.</p>{data.briefs[inv.id] && <EvidenceBrief brief={data.briefs[inv.id]} bank={data.bank} onReview={() => void reviewBrief(inv.id, data.briefs[inv.id])} reviewing={busy === `review-${inv.id}`} />}</div>)}{data.unresolvedInvoices.length === 0 && <p className="empty">No unresolved invoices.</p>}</div></section>
       <section className="card"><div className="sectionhead"><div><p className="eyebrow">04 · BANK REVIEW</p><h2>Unresolved bank entries</h2><p>Review fees, other income, capital, loans and unmatched customer payments.</p></div></div><div className="tablewrap"><table><thead><tr><th>Source</th><th>Date</th><th>Description</th><th>Amount</th></tr></thead><tbody>{data.unresolvedBank.map(b => <tr key={b.id}><td>{b.id} <small>row {b.sourceRow}</small></td><td>{b.date}</td><td>{b.description}</td><td>{money(b.amountKobo)}</td></tr>)}</tbody></table></div></section>
       <section className="card handover"><div className="sectionhead"><div><p className="eyebrow">05 · REVIEW TRAIL</p><h2>A clear handover</h2><p>Download a visual PDF summary or a complete Excel workbook with source hashes, decisions, verification receipts, unresolved items, AI briefs, and audit activity.</p></div><div className="export-actions"><button className="quiet export-pdf" disabled={!!busy} onClick={() => void downloadPack('pdf')}>{busy === 'export-pdf' ? 'Preparing PDF…' : 'Download PDF'}</button><button disabled={!!busy} onClick={() => void downloadPack('xlsx')}>{busy === 'export-xlsx' ? 'Preparing Excel…' : 'Download Excel'}</button></div></div><div className="activity">{data.audit.slice(-5).reverse().map((event, index) => <div key={`${event.at}-${index}`}><span className="activity-dot"/><strong>{activityText(event)}</strong><time>{new Date(event.at).toLocaleString('en-NG')}</time></div>)}{data.audit.length === 0 && <p className="empty">Your review activity will appear here.</p>}</div></section>
     </>}
