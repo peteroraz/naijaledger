@@ -163,7 +163,17 @@ function Desk({ user }: { user: User }) {
   }, [data?.intakeDraft?.id]);
 
   function addIntakeFiles(files: FileList | File[]) {
-    setIntakeFiles(current => [...current, ...Array.from(files)].slice(0, 8));
+    const selected = Array.from(files);
+    if (!selected.length) return;
+    const next = [...intakeFiles, ...selected];
+    if (next.length > 8) return setError('Choose no more than 8 source files');
+    const oversized = selected.find(file => file.size > 15 * 1024 * 1024);
+    if (oversized) return setError(`${oversized.name} exceeds the 15 MB per-file limit`);
+    if (next.reduce((sum, file) => sum + file.size, 0) > 40 * 1024 * 1024) return setError('Combined source files exceed the 40 MB limit');
+    const unsupported = selected.find(file => !/\.(png|jpe?g|webp|pdf|docx|xlsx|txt|wav|mp3|m4a|ogg|webm|aac)$/i.test(file.name));
+    if (unsupported) return setError(`${unsupported.name} is not a supported source type`);
+    setError('');
+    setIntakeFiles(next);
   }
 
   async function toggleRecording() {
@@ -295,7 +305,7 @@ function Desk({ user }: { user: User }) {
         <div className="sectionhead"><div><p className="eyebrow">01 · META SMART INTAKE</p><h2>Turn messy records into reviewable invoices</h2><p>Upload several sources at once, dictate a sale, or type it naturally. Nothing enters the ledger until you confirm it.</p></div><span className="pill">Human-controlled import</span></div>
         <div className="intake-compose">
           <div className="intake-upload">
-            <label className="drop smart-drop"><strong>Documents, scans and voice notes</strong><span>Handwritten daybooks, invoice images, PDF, DOCX, XLSX, TXT, WAV, MP3, M4A, OGG or WEBM</span><input aria-label="Upload sales source documents" type="file" multiple accept=".png,.jpg,.jpeg,.webp,.pdf,.docx,.xlsx,.txt,.wav,.mp3,.m4a,.ogg,.webm,.aac,image/png,image/jpeg,image/webp,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/plain,audio/*" disabled={!!busy} onChange={event => { if (event.target.files) addIntakeFiles(event.target.files); event.target.value = ''; }} /><em>Choose up to 8 source files</em><small>15 MB each · 40 MB combined · originals are not stored</small></label>
+            <label className="drop smart-drop"><strong>Documents, scans and voice notes</strong><span>Handwritten daybooks, invoice images, PDF, DOCX, XLSX, TXT, WAV, MP3, M4A, OGG or WEBM</span><input aria-label="Upload sales source documents" type="file" multiple accept=".png,.jpg,.jpeg,.webp,.pdf,.docx,.xlsx,.txt,.wav,.mp3,.m4a,.ogg,.webm,.aac,image/png,image/jpeg,image/webp,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/plain,audio/*" disabled={!!busy} onChange={event => { const selected = Array.from(event.currentTarget.files || []); event.currentTarget.value = ''; addIntakeFiles(selected); }} /><em>Choose up to 8 source files</em><small>15 MB each · 40 MB combined · originals are not stored</small></label>
             <button type="button" className={`voice-button ${recording ? 'recording' : ''}`} disabled={!!busy} onClick={() => void toggleRecording()}><span>{recording ? '■' : '●'}</span>{recording ? 'Stop and attach voice entry' : 'Record a voice entry'}</button>
             {intakeFiles.length > 0 && <div className="file-chips" aria-label="Selected source files">{intakeFiles.map((file, index) => <span key={`${file.name}-${file.lastModified}-${index}`}><b>{file.name}</b><small>{(file.size / 1024 / 1024).toFixed(1)} MB</small><button aria-label={`Remove ${file.name}`} disabled={!!busy} onClick={() => setIntakeFiles(current => current.filter((_, itemIndex) => itemIndex !== index))}>×</button></span>)}</div>}
           </div>

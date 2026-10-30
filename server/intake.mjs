@@ -57,6 +57,14 @@ function intakeError(message, status = 400) {
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const clean = (value, maximum = 240) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, maximum);
+const cleanDocumentText = (value, maximum = INTAKE_LIMITS.textCharacters) => String(value ?? '')
+  .replace(/\r\n?/g, '\n')
+  .replace(/[^\S\n\t]+/g, ' ')
+  .replace(/ *\t */g, '\t')
+  .replace(/ *\n */g, '\n')
+  .replace(/\n{3,}/g, '\n\n')
+  .trim()
+  .slice(0, maximum);
 
 function validDate(value) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
@@ -76,10 +84,18 @@ function sourceKind(mimeType, filename) {
   return 'unsupported';
 }
 
-function mimeFor(kind, supplied) {
+function mimeFor(kind, supplied, filename = '') {
+  const mime = String(supplied || '').toLowerCase();
+  const extension = extname(String(filename || '')).toLowerCase();
   if (kind === 'pdf') return 'application/pdf';
-  if (kind === 'image') return supplied === 'image/jpg' ? 'image/jpeg' : supplied;
-  return supplied || 'application/octet-stream';
+  if (kind === 'image') {
+    if (mime === 'image/jpg') return 'image/jpeg';
+    if (['image/png', 'image/jpeg', 'image/webp'].includes(mime)) return mime;
+    if (extension === '.png') return 'image/png';
+    if (['.jpg', '.jpeg'].includes(extension)) return 'image/jpeg';
+    if (extension === '.webp') return 'image/webp';
+  }
+  return mime || 'application/octet-stream';
 }
 
 function dataUrl(mimeType, buffer) {
@@ -205,7 +221,7 @@ async function prepareSource(source, options) {
     source: base,
     content: [
       { type: 'text', text: `Extract every supported sales entry from this source. Source filename: ${base.name}` },
-      { type: 'image_url', image_url: { url: dataUrl(mimeFor('image', source.mimeType), source.buffer) } },
+      { type: 'image_url', image_url: { url: dataUrl(mimeFor('image', source.mimeType, source.name), source.buffer) } },
     ],
   };
   if (source.type === 'pdf') return {
@@ -241,7 +257,7 @@ async function prepareSource(source, options) {
     extractedText = await options.transcribe(source.buffer, options);
     pipeline = `${VOICE_MODEL} → ${SPARK_MODEL}`;
   }
-  extractedText = clean(extractedText, INTAKE_LIMITS.textCharacters);
+  extractedText = cleanDocumentText(extractedText);
   if (!extractedText) throw intakeError('The source contains no readable text', 422);
   return {
     source: { ...base, pipeline, preview: extractedText.slice(0, 600) },

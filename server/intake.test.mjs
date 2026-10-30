@@ -65,6 +65,54 @@ test('handwritten image input is sent inline with exact source provenance', asyn
   assert.match(draft.candidates[0].sourceHash, /^[a-f0-9]{64}$/);
 });
 
+test('image MIME type is inferred from its filename when the browser omits it', async () => {
+  const bytes = Buffer.from('synthetic-image-bytes');
+  let content;
+  await extractInvoiceIntake([{
+    originalname: 'phone-scan.jpeg', mimetype: '', size: bytes.length, buffer: bytes,
+  }], '', {
+    apiKey: 'test-only',
+    fetcher: async (_url, init) => {
+      content = JSON.parse(init.body).messages[1].content;
+      return completion({ documentSummary: 'No supported sale.', entries: [] });
+    },
+  });
+  assert.match(content[1].image_url.url, /^data:image\/jpeg;base64,/);
+});
+
+test('PDF input uses the Meta file block with a data URL', async () => {
+  const bytes = Buffer.from('%PDF-1.4 synthetic test');
+  let content;
+  await extractInvoiceIntake([{
+    originalname: 'invoice.pdf', mimetype: 'application/pdf', size: bytes.length, buffer: bytes,
+  }], '', {
+    apiKey: 'test-only',
+    fetcher: async (_url, init) => {
+      content = JSON.parse(init.body).messages[1].content;
+      return completion({ documentSummary: 'No supported sale.', entries: [] });
+    },
+  });
+  assert.equal(content[1].type, 'file');
+  assert.equal(content[1].file.filename, 'invoice.pdf');
+  assert.match(content[1].file.file_data, /^data:application\/pdf;base64,/);
+});
+
+test('TXT and spreadsheet-style source boundaries are preserved for extraction', async () => {
+  const bytes = Buffer.from('Invoice\tDate\tCustomer\tAmount\nTXT-1\t2026-10-29\tKano Mart\t120000\nTXT-2\t2026-10-30\tLokoja Foods\t45000');
+  let content;
+  await extractInvoiceIntake([{
+    originalname: 'sales.txt', mimetype: 'text/plain', size: bytes.length, buffer: bytes,
+  }], '', {
+    apiKey: 'test-only',
+    fetcher: async (_url, init) => {
+      content = JSON.parse(init.body).messages[1].content;
+      return completion({ documentSummary: 'No supported sale.', entries: [] });
+    },
+  });
+  assert.match(content, /Invoice\tDate\tCustomer\tAmount\nTXT-1/);
+  assert.match(content, /120000\nTXT-2/);
+});
+
 test('voice entry uses dedicated Muse Voice transcription request', async () => {
   let observed;
   const transcript = await transcribeVoice(Buffer.from('audio input'), {
