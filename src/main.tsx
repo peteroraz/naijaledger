@@ -21,6 +21,21 @@ type Brief = {
   missingEvidence: string[]; model: string; status: string; sourceFingerprint: string; createdAt: string;
   verification?: Verification;
 };
+type AgentAnswer = {
+  question: string; finding: string; calculation: string; confidence: 'low' | 'medium'; missingEvidence: string[];
+  nextCheck: string; decisionBoundary: string; model: string; createdAt: string; sourceFingerprint: string;
+  evidence: { sourceId: string; statement: string; type: string; title: string; locator: string; sourceHash: string }[];
+  retrieval: {
+    mode: 'hybrid-vector' | 'structured-lexical' | 'structured-lexical-fallback'; chunksConsidered: number; selectedCount: number; embeddingModel?: string | null;
+    evidence: { id: string; type: string; title: string; label: string; locator: string; verificationStatus: string; retrievalReason: string; retrievalScore?: number }[];
+  };
+  verification: {
+    status: 'checks_passed' | 'human_review_required'; checkedAt: string;
+    checks: { id: string; label: string; passed: boolean; detail: string }[];
+    modelReview: { model: string; verdict: 'supported' | 'needs_review' | 'unavailable' | 'skipped'; checkedClaims: number; issues: { claim: string; reason: string; evidenceIds: string[] }[] };
+    humanReview: { status: 'pending' | 'reviewed'; reviewedAt?: string; reviewedBy?: string };
+  };
+};
 type IntakeSource = {
   id: string; name: string; type: string; mimeType: string; sha256: string; size: number;
   status: 'extracted' | 'failed'; summary?: string; preview?: string; entryCount: number; error?: string; pipeline?: string;
@@ -41,9 +56,9 @@ type Workspace = {
   stockReview: { items: StockItem[]; summary: { totalItems: number; balancedItems: number; varianceItems: number } };
   reviewCycle: { title: string; startedAt: string }; reviewHistory: ReviewHistory[];
   totals: { invoicedKobo: number; bankCreditsKobo: number; approvedKobo: number };
-  version: number; imports: Record<string, string>; briefs: Record<string, Brief>; intakeDraft: IntakeDraft | null; updatedAt: string;
+  version: number; imports: Record<string, string>; briefs: Record<string, Brief>; agentAnswers: AgentAnswer[]; intakeDraft: IntakeDraft | null; updatedAt: string;
   audit: { action: string; kind?: string; rows?: number; sources?: number; invoiceId?: string; bankId?: string; at: string }[];
-  demo: { isDemo: boolean; limits: { intake: number; investigate: number }; usage: { intake: number; investigate: number } };
+  demo: { isDemo: boolean; limits: { intake: number; investigate: number; agent: number }; usage: { intake: number; investigate: number; agent: number } };
 };
 const money = (n: number) => new Intl.NumberFormat('en-NG', { style: 'currency', currency: 'NGN' }).format(n / 100);
 const json = (body: unknown): RequestInit => ({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -83,6 +98,8 @@ function activityText(event: Workspace['audit'][number]) {
   if (event.action === 'stock-count-saved') return `Saved ${event.rows} stock-count items`;
   if (event.action === 'review-cycle-started') return 'Archived the completed review and started a clean cycle';
   if (event.action === 'brief-reviewed') return `Human reviewed ${event.invoiceId} evidence brief`;
+  if (event.action === 'rag-asked') return 'Asked the NaijaLedger Evidence Agent';
+  if (event.action === 'rag-reviewed') return 'Human reviewed an Evidence Agent answer';
   return `Investigated and verified ${event.invoiceId}`;
 }
 
@@ -156,6 +173,25 @@ function EvidenceBrief({ brief, bank, onReview, reviewing }: { brief: Brief; ban
   </div>;
 }
 
+function EvidenceAgentAnswer({ answer, onReview, reviewing }: { answer: AgentAnswer; onReview: () => void; reviewing: boolean }) {
+  const citation = (id: string) => answer.evidence.find(item => item.sourceId === id);
+  const vectorMode = answer.retrieval.mode === 'hybrid-vector';
+  return <section className="rag-result" aria-label="NaijaLedger Evidence Agent answer">
+    <div className="rag-retrieval-head"><div><small>RETRIEVED BEFORE GENERATION</small><strong>{answer.retrieval.selectedCount} of {answer.retrieval.chunksConsidered} evidence chunks selected</strong><p>{vectorMode ? `Firestore vector search + accounting filters · ${answer.retrieval.embeddingModel}` : 'Accounting-aware lexical retrieval · vector-safe fallback'}</p></div><span className={vectorMode ? 'vector-live' : 'vector-fallback'}>{vectorMode ? 'Vector RAG live' : 'Hybrid fallback'}</span></div>
+    <div className="rag-source-grid">{answer.retrieval.evidence.map(source => <article key={source.id}><div><span>{source.type.replaceAll('_', ' ')}</span><em>{source.verificationStatus.replaceAll('_', ' ')}</em></div><strong>{source.title}</strong><p>{source.locator}</p><small>{source.retrievalReason || 'supporting evidence'}</small></article>)}</div>
+    <div className="rag-answer-body">
+      <div className="rag-answer-title"><span className="spark">✦</span><div><small>MUSE SPARK · GROUNDED ANSWER</small><strong>{answer.question}</strong></div><span className="model-badge">{answer.model}</span></div>
+      <p className="rag-finding">{answer.finding}</p>
+      <div className="rag-citations">{answer.evidence.map(item => <article key={`${item.sourceId}-${item.statement}`}><span>{item.sourceId}</span><p>{item.statement}</p><small>{item.title} · {item.locator}</small></article>)}</div>
+      {answer.calculation && <div className="rag-calculation"><small>CALCULATION</small><p>{answer.calculation}</p></div>}
+      <div className="rag-actions-grid"><div><small>CONFIDENCE</small><strong>{answer.confidence}</strong><p>Constrained to low or medium until a person checks the evidence.</p></div><div><small>NEXT CHECK</small><strong>{answer.nextCheck}</strong></div></div>
+      {answer.missingEvidence.length > 0 && <div className="missing"><strong>Evidence still needed</strong><ul>{answer.missingEvidence.map((item, index) => <li key={index}>{item}</li>)}</ul></div>}
+      <section className={`receipt ${answer.verification.status}`}><div className="receipt-head"><div><small>RAG VERIFICATION RECEIPT</small><strong>{answer.verification.status === 'checks_passed' ? 'Retrieval and groundedness checks passed' : 'Human attention required'}</strong></div><span>{answer.verification.checks.filter(check => check.passed).length}/{answer.verification.checks.length} deterministic checks</span></div><div className="check-grid">{answer.verification.checks.map(check => <div className={check.passed ? 'check pass' : 'check fail'} key={check.id}><b>{check.passed ? '✓' : '!'}</b><div><strong>{check.label}</strong><p>{check.detail}</p></div></div>)}</div><div className="verifier-row"><div><small>INDEPENDENT MUSE REVIEW</small><strong>{answer.verification.modelReview.verdict === 'supported' ? 'Groundedness supported' : 'Claims need review'}</strong><p>{answer.verification.modelReview.checkedClaims} claims checked</p></div><span className={`verdict ${answer.verification.modelReview.verdict}`}>{answer.verification.modelReview.verdict.replace('_', ' ')}</span></div><div className="human-signoff"><div><small>HUMAN CHECKPOINT</small><strong>{answer.verification.humanReview.status === 'reviewed' ? 'Answer reviewed by a person' : 'Review is still required'}</strong><p>{answer.decisionBoundary}</p></div>{answer.verification.humanReview.status === 'reviewed' ? <span className="reviewed">✓ Reviewed {answer.verification.humanReview.reviewedAt && new Date(answer.verification.humanReview.reviewedAt).toLocaleString('en-NG')}</span> : <button disabled={reviewing} onClick={onReview}>{reviewing ? 'Saving review…' : 'Mark answer reviewed'}</button>}</div></section>
+      <small className="provenance">Source fingerprint: {answer.sourceFingerprint.slice(0, 16)}… · {citation(answer.evidence[0]?.sourceId)?.sourceHash?.slice(0, 10) || 'source hashes retained'} · AI cannot approve a match, adjustment, or tax treatment.</small>
+    </div>
+  </section>;
+}
+
 function Desk({ user }: { user: User }) {
   const [data, setData] = useState<Workspace | null>(null);
   const [error, setError] = useState('');
@@ -166,6 +202,7 @@ function Desk({ user }: { user: User }) {
   const [selectedDrafts, setSelectedDrafts] = useState<Set<string>>(new Set());
   const [stockDraft, setStockDraft] = useState<StockItem[]>([]);
   const [cycleTitle, setCycleTitle] = useState('');
+  const [agentQuestion, setAgentQuestion] = useState('Why is INV-002 unresolved, and what evidence should I check next?');
   const recorderRef = useRef<{ recorder: MediaRecorder; stream: MediaStream } | null>(null);
   const refresh = () => api<Workspace>(user, '/workspace').then(setData).catch(e => setError(e.message));
   useEffect(() => { void refresh(); }, [user.uid]);
@@ -301,6 +338,22 @@ function Desk({ user }: { user: User }) {
     } catch (e) { setError((e as Error).message); void refresh(); }
     finally { setBusy(''); }
   }
+  async function askAgent(question = agentQuestion) {
+    if (!data || !question.trim()) return;
+    setBusy('rag-agent'); setError('');
+    try {
+      const result = await api<{ answer: AgentAnswer; workspace: Workspace }>(user, '/agent/query', json({ question: question.trim(), version: data.version }));
+      setData(result.workspace); setAgentQuestion(question.trim());
+    } catch (e) { setError((e as Error).message); void refresh(); }
+    finally { setBusy(''); }
+  }
+  async function reviewAgentAnswer(answer: AgentAnswer) {
+    if (!data) return;
+    setBusy('rag-review'); setError('');
+    try { setData(await api<Workspace>(user, '/agent/reviews', json({ sourceFingerprint: answer.sourceFingerprint, createdAt: answer.createdAt, version: data.version }))); }
+    catch (e) { setError((e as Error).message); void refresh(); }
+    finally { setBusy(''); }
+  }
   async function reviewBrief(id: string, brief: Brief) {
     if (!data) return;
     setBusy(`review-${id}`); setError('');
@@ -332,10 +385,16 @@ function Desk({ user }: { user: User }) {
       {data.demo.isDemo && <section className="demo-banner" aria-label="Judge Demo status">
         <div className="demo-emblem">✦</div>
         <div><small>JUDGE DEMO · ISOLATED SESSION</small><strong>Live Meta models. Synthetic business records.</strong><p>Nothing here belongs to a real business. Human review is still required.</p></div>
-        <div className="demo-allowances"><span><b>{Math.max(0, data.demo.limits.intake - data.demo.usage.intake)}</b> Smart Intake calls left</span><span><b>{Math.max(0, data.demo.limits.investigate - data.demo.usage.investigate)}</b> investigations left</span></div>
+        <div className="demo-allowances"><span><b>{Math.max(0, data.demo.limits.intake - data.demo.usage.intake)}</b> Smart Intake calls left</span><span><b>{Math.max(0, data.demo.limits.investigate - data.demo.usage.investigate)}</b> investigations left</span><span><b>{Math.max(0, data.demo.limits.agent - data.demo.usage.agent)}</b> Evidence Agent questions left</span></div>
         <button className="quiet" disabled={!!busy} onClick={() => void resetDemo()}>{busy === 'demo-reset' ? 'Resetting…' : 'Reset sample'}</button>
       </section>}
       <section className="stats"><article><small>Invoice sales</small><b>{money(data.totals.invoicedKobo)}</b><span>{data.invoices.length} structured records</span></article><article><small>Cashbook takings</small><b>{money(data.cashReview.totals.cashSalesKobo)}</b><span>{data.cashbook.length} cash entries</span></article><article><small>Reviewed settlement</small><b>{money(data.totals.approvedKobo + data.cashReview.totals.bankedCashKobo)}</b><span>{data.matches.length + data.cashReview.matches.length} approved allocations</span></article><article><small>Stock exceptions</small><b>{data.stockReview.summary.varianceItems}</b><span>{data.stockReview.summary.balancedItems}/{data.stockReview.summary.totalItems} items balanced</span></article></section>
+      <section className="card rag-agent-card">
+        <div className="sectionhead"><div><p className="eyebrow">META RAG · NAIJALEDGER EVIDENCE AGENT</p><h2>Ask across sales, cash, bank, stock and review history</h2><p>NaijaLedger retrieves the most relevant records and bookkeeping rules first, then Muse Spark answers only from that cited evidence.</p></div><span className="pill">Retrieval visible to judges</span></div>
+        <div className="rag-ask"><textarea aria-label="Question for NaijaLedger Evidence Agent" maxLength={600} value={agentQuestion} disabled={!!busy} onChange={event => setAgentQuestion(event.target.value)} placeholder="Ask why a transaction is unresolved, which cash is not deposited, or what explains a stock variance…"/><button disabled={!!busy || agentQuestion.trim().length < 4 || (data.demo.isDemo && data.demo.usage.agent >= data.demo.limits.agent)} onClick={() => void askAgent()}>{busy === 'rag-agent' ? 'Retrieving + verifying…' : data.demo.isDemo && data.demo.usage.agent >= data.demo.limits.agent ? 'Demo question limit reached' : 'Ask Evidence Agent'}</button></div>
+        <div className="rag-prompts">{['Why is INV-002 unresolved, and what evidence should I check next?', 'Which cashbook entries are not yet supported by a bank lodgement?', 'Explain the stock variances and the next human check.', 'What changed in completed review history?'].map(prompt => <button className="quiet" disabled={!!busy} key={prompt} onClick={() => { setAgentQuestion(prompt); void askAgent(prompt); }}>{prompt}</button>)}</div>
+        {data.agentAnswers.length > 0 ? <EvidenceAgentAnswer answer={data.agentAnswers.at(-1)!} onReview={() => void reviewAgentAnswer(data.agentAnswers.at(-1)!)} reviewing={busy === 'rag-review'} /> : <div className="rag-empty"><span>✦</span><div><strong>Ready to retrieve</strong><p>The answer will show its retrieved records before the generated finding.</p></div></div>}
+      </section>
       <section className="card smart-intake">
         <div className="sectionhead"><div><p className="eyebrow">01 · META SMART INTAKE</p><h2>Turn messy records into invoices or cashbook entries</h2><p>Upload handwritten daybooks, scans and documents; dictate a cash sale; or type it naturally. Meta classifies each row, and nothing enters the ledger until you confirm it.</p></div><span className="pill">Human-controlled import</span></div>
         <div className="intake-compose">

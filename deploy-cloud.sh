@@ -15,12 +15,23 @@ if [[ -z "$FIREBASE_WEB_API_KEY" ]]; then
 fi
 
 gcloud config set project "$PROJECT"
-gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com firestore.googleapis.com
+gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com firestore.googleapis.com aiplatform.googleapis.com
 
 if ! gcloud iam service-accounts describe "$IDENTITY" --project "$PROJECT" >/dev/null 2>&1; then
   gcloud iam service-accounts create "$SERVICE_ACCOUNT" --display-name 'NaijaLedger runtime' --project "$PROJECT"
 fi
 gcloud projects add-iam-policy-binding "$PROJECT" --member="serviceAccount:${IDENTITY}" --role=roles/datastore.user --condition=None --quiet >/dev/null
+gcloud projects add-iam-policy-binding "$PROJECT" --member="serviceAccount:${IDENTITY}" --role=roles/aiplatform.user --condition=None --quiet >/dev/null
+
+# The Evidence Agent works immediately with structured lexical retrieval. This
+# vector index upgrades it to semantic hybrid retrieval as soon as Firestore
+# finishes building the index.
+if ! gcloud firestore indexes composite list --project "$PROJECT" --database='(default)' --filter='collectionGroup:ragChunks' --format='value(fields.fieldPath)' | grep -q embedding; then
+  gcloud firestore indexes composite create \
+    --project="$PROJECT" --database='(default)' --collection-group=ragChunks --query-scope=COLLECTION \
+    --field-config=field-path=embedding,vector-config='{"dimension":"768","flat": "{}"}' \
+    --async
+fi
 
 # Cloud Build's default identity needs permission to build source deployments.
 BUILD_IDENTITY=$(gcloud builds get-default-service-account --project "$PROJECT")
@@ -29,7 +40,7 @@ gcloud projects add-iam-policy-binding "$PROJECT" --member="serviceAccount:${BUI
 
 gcloud run deploy "$SERVICE" --source . --project "$PROJECT" --region "$REGION" \
   --service-account "$IDENTITY" --allow-unauthenticated \
-  --set-env-vars "FIREBASE_PROJECT_ID=${PROJECT},FIREBASE_WEB_API_KEY=${FIREBASE_WEB_API_KEY},FIREBASE_WEB_APP_ID=1:793831462989:web:348988662e1b2adc8e6404" \
+  --set-env-vars "FIREBASE_PROJECT_ID=${PROJECT},FIREBASE_WEB_API_KEY=${FIREBASE_WEB_API_KEY},FIREBASE_WEB_APP_ID=1:793831462989:web:348988662e1b2adc8e6404,VERTEX_EMBEDDING_LOCATION=us-central1,VERTEX_EMBEDDING_MODEL=gemini-embedding-001" \
   --min-instances 0 --max-instances 2 --memory 512Mi --cpu 1 --concurrency 20 --timeout 60 --quiet
 
 SERVICE_URL=$(gcloud run services describe "$SERVICE" --project "$PROJECT" --region "$REGION" --format='value(status.url)')

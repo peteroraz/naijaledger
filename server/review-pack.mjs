@@ -43,7 +43,7 @@ export function createReviewPack(state, generatedAt = new Date().toISOString()) 
     cashbook: state.cashbook || [], cashAllocations, cashReview,
     stockReview: reconcileStock(state.stock || []),
     reviewCycle: state.reviewCycle || null, reviewHistory: state.reviewHistory || [],
-    briefs: state.briefs || {},
+    briefs: state.briefs || {}, agentAnswers: state.agentAnswers || [],
     audit: state.audit || [],
     updatedAt: state.updatedAt,
   };
@@ -119,6 +119,7 @@ export async function buildReviewWorkbook(report) {
     ['Approved invoice total', amount(report.totals.approvedKobo), 'AI evidence briefs', Object.keys(report.briefs).length],
     ['Cashbook total', amount(report.cashReview.totals.cashSalesKobo), 'Approved cash lodgements', report.cashReview.matches.length],
     ['Stock items', report.stockReview.summary.totalItems, 'Stock variances', report.stockReview.summary.varianceItems],
+    ['Evidence Agent answers', report.agentAnswers.length, 'Completed review history', report.reviewHistory.length],
   ];
   summary.addRows([[], ['Review summary'], ...summaryRows]);
   const sectionRow = 4;
@@ -127,7 +128,7 @@ export async function buildReviewWorkbook(report) {
     cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: `FF${GREEN}` } };
     cell.font = { name: 'Arial', size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
   });
-  for (let row = 5; row <= 12; row += 1) {
+  for (let row = 5; row <= 13; row += 1) {
     summary.getRow(row).font = { name: 'Arial', size: 10, color: { argb: `FF${TEXT}` } };
     summary.getCell(`A${row}`).font = { name: 'Arial', size: 10, bold: true, color: { argb: `FF${MUTED}` } };
     summary.getCell(`C${row}`).font = { name: 'Arial', size: 10, bold: true, color: { argb: `FF${MUTED}` } };
@@ -241,6 +242,25 @@ export async function buildReviewWorkbook(report) {
   briefs.pageSetup.fitToWidth = 2;
   briefs.eachRow((row, rowNumber) => { if (rowNumber > 1) row.height = 90; });
 
+  const agentSheet = addRowsSheet(workbook, 'Evidence Agent', [
+    { header: 'Asked at', key: 'createdAt', style: { numFmt: 'yyyy-mm-dd hh:mm' } }, { header: 'Question', key: 'question' },
+    { header: 'Finding', key: 'finding' }, { header: 'Cited evidence', key: 'evidence' }, { header: 'Calculation', key: 'calculation' },
+    { header: 'Confidence', key: 'confidence' }, { header: 'Missing evidence', key: 'missingEvidence' }, { header: 'Next check', key: 'nextCheck' },
+    { header: 'Retrieval mode', key: 'retrievalMode' }, { header: 'Chunks considered', key: 'chunksConsidered' }, { header: 'Chunks selected', key: 'selectedCount' },
+    { header: 'Model', key: 'model' }, { header: 'Automated status', key: 'automatedStatus' }, { header: 'Verifier verdict', key: 'verifierVerdict' },
+    { header: 'Human review', key: 'humanReview' }, { header: 'Source fingerprint', key: 'sourceFingerprint' },
+  ], report.agentAnswers.map(answer => ({
+    createdAt: dateValue(answer.createdAt), question: answer.question, finding: answer.finding,
+    evidence: (answer.evidence || []).map(item => `${item.sourceId}: ${item.statement}`).join('\n'), calculation: answer.calculation,
+    confidence: answer.confidence, missingEvidence: (answer.missingEvidence || []).join('\n'), nextCheck: answer.nextCheck,
+    retrievalMode: answer.retrieval?.mode, chunksConsidered: answer.retrieval?.chunksConsidered, selectedCount: answer.retrieval?.selectedCount,
+    model: answer.model, automatedStatus: answer.verification?.status, verifierVerdict: answer.verification?.modelReview?.verdict,
+    humanReview: answer.verification?.humanReview?.status || 'pending', sourceFingerprint: answer.sourceFingerprint,
+  })), { A: 21, B: 48, C: 60, D: 70, E: 36, F: 14, G: 42, H: 45, I: 26, J: 18, K: 16, L: 18, M: 20, N: 18, O: 16, P: 68 });
+  ['B', 'C', 'D', 'E', 'G', 'H'].forEach(column => { agentSheet.getColumn(column).alignment = { vertical: 'top', wrapText: true }; });
+  agentSheet.pageSetup.fitToWidth = 2;
+  agentSheet.eachRow((row, rowNumber) => { if (rowNumber > 1) row.height = 80; });
+
   const verificationRows = [];
   for (const [invoiceId, brief] of Object.entries(report.briefs)) {
     for (const check of brief.verification?.checks || []) verificationRows.push({
@@ -252,8 +272,20 @@ export async function buildReviewWorkbook(report) {
       detail: issue.reason, evidenceIds: (issue.evidenceIds || []).join(', '), checkedAt: dateValue(brief.verification?.checkedAt),
     });
   }
+  for (const answer of report.agentAnswers) {
+    for (const check of answer.verification?.checks || []) verificationRows.push({
+      invoiceId: `RAG ${iso(answer.createdAt)}`, category: 'RAG deterministic check', item: check.label,
+      result: check.passed ? 'Passed' : 'Failed', detail: check.detail,
+      evidenceIds: (answer.evidence || []).map(item => item.sourceId).join(', '), checkedAt: dateValue(answer.verification?.checkedAt),
+    });
+    for (const issue of answer.verification?.modelReview?.issues || []) verificationRows.push({
+      invoiceId: `RAG ${iso(answer.createdAt)}`, category: 'RAG independent Muse review', item: issue.claim,
+      result: answer.verification.modelReview.verdict, detail: issue.reason,
+      evidenceIds: (issue.evidenceIds || []).join(', '), checkedAt: dateValue(answer.verification?.checkedAt),
+    });
+  }
   const checks = addRowsSheet(workbook, 'Verification Checks', [
-    { header: 'Invoice ID', key: 'invoiceId' }, { header: 'Category', key: 'category' }, { header: 'Check or claim', key: 'item' },
+    { header: 'Reference', key: 'invoiceId' }, { header: 'Category', key: 'category' }, { header: 'Check or claim', key: 'item' },
     { header: 'Result', key: 'result' }, { header: 'Detail', key: 'detail' }, { header: 'Evidence IDs', key: 'evidenceIds' },
     { header: 'Checked at', key: 'checkedAt', style: { numFmt: 'yyyy-mm-dd hh:mm' } },
   ], verificationRows, { A: 14, B: 27, C: 36, D: 17, E: 62, F: 28, G: 21 });
@@ -350,6 +382,7 @@ export async function buildReviewPdf(report) {
       ['Approved total', ngn(report.totals.approvedKobo), 'AI evidence briefs', Object.keys(report.briefs).length],
       ['Cashbook total', ngn(report.cashReview.totals.cashSalesKobo), 'Approved cash deposits', report.cashReview.matches.length],
       ['Stock items', report.stockReview.summary.totalItems, 'Stock variances', report.stockReview.summary.varianceItems],
+      ['Evidence Agent answers', report.agentAnswers.length, 'Completed reviews', report.reviewHistory.length],
     ], [112, 126, 112, 126], ['left', 'right', 'left', 'right']);
 
     section('Source fingerprints');
@@ -394,6 +427,35 @@ export async function buildReviewPdf(report) {
       iso(row.completedAt).slice(0, 10), row.title, `${row.counts.invoices} inv / ${row.counts.cashbook} cash / ${row.counts.bank} bank`, ngn(row.totals.approvedInvoiceKobo + row.totals.bankedCashKobo), row.results.stockVarianceItems,
     ]), [72, 128, 116, 104, 56], ['left', 'left', 'left', 'right', 'right']);
     else paragraph('No completed review cycles yet.', { color: `#${MUTED}` });
+
+    section('NaijaLedger Evidence Agent - retrieved sources and answers');
+    if (!report.agentAnswers.length) paragraph('No Evidence Agent questions have been asked.', { color: `#${MUTED}` });
+    for (const answer of report.agentAnswers) {
+      ensureSpace(150);
+      const answerY = doc.y;
+      doc.save().roundedRect(42, answerY, doc.page.width - 84, 25, 5).fill(`#${LIGHT_GREEN}`).restore();
+      doc.fillColor(`#${GREEN}`).font('Helvetica-Bold').fontSize(9).text(`Evidence Agent - ${text(answer.model)}`, 50, answerY + 8, { lineBreak: false });
+      doc.y = answerY + 34;
+      paragraph(`Question: ${answer.question}`, { bold: true, size: 9 });
+      paragraph(`Retrieval: ${answer.retrieval?.mode || 'not available'} | ${answer.retrieval?.selectedCount || 0} of ${answer.retrieval?.chunksConsidered || 0} chunks selected`, { size: 7.6, color: `#${MUTED}` });
+      if (answer.retrieval?.evidence?.length) pdfTable(doc, ['Retrieved source', 'Type', 'Locator', 'Retrieval reason'], answer.retrieval.evidence.map(source => [
+        source.id, source.type, source.locator, source.retrievalReason,
+      ]), [104, 74, 112, 186]);
+      paragraph(`Finding: ${answer.finding}`, { bold: true, size: 8.5 });
+      for (const item of answer.evidence || []) paragraph(`Citation ${item.sourceId}: ${item.statement} (${item.locator})`, { size: 7.8 });
+      if (answer.calculation) paragraph(`Calculation: ${answer.calculation}`, { size: 8 });
+      if (answer.missingEvidence?.length) paragraph(`Evidence still needed: ${answer.missingEvidence.join('; ')}`, { size: 8 });
+      paragraph(`Next check: ${answer.nextCheck}`, { size: 8 });
+      const verification = answer.verification;
+      if (verification) {
+        paragraph(`Automated status: ${verification.status} | Independent Muse verdict: ${verification.modelReview?.verdict || 'not available'} | Claims checked: ${verification.modelReview?.checkedClaims || 0}`, { bold: true, size: 8 });
+        pdfTable(doc, ['RAG check', 'Result', 'Detail'], (verification.checks || []).map(check => [check.label, check.passed ? 'Passed' : 'Failed', check.detail]), [126, 62, 288], ['left', 'center', 'left']);
+        const human = verification.humanReview || { status: 'pending' };
+        paragraph(`Human checkpoint: ${human.status}${human.reviewedAt ? ` at ${iso(human.reviewedAt)}` : ''}. ${answer.decisionBoundary}`, { size: 8, color: human.status === 'reviewed' ? `#${GREEN}` : '#7A5421' });
+      }
+      paragraph(`Source fingerprint: ${answer.sourceFingerprint}`, { size: 7.2, color: `#${MUTED}` });
+      doc.moveDown(0.8);
+    }
 
     section('Meta evidence briefs and verification receipts');
     const briefs = Object.entries(report.briefs);

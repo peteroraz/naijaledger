@@ -12,7 +12,7 @@ export function seedWorkspace() {
     bank: parseCsv(samples.bank, 'bank'),
     cashbook: parseCsv(samples.cashbook, 'cashbook'),
     stock: parseCsv(samples.stock, 'stock'),
-    approved: [], cashAllocations: [], briefs: {}, intakeDraft: null, audit: [], reviewHistory: [], version: 0,
+    approved: [], cashAllocations: [], briefs: {}, agentAnswers: [], intakeDraft: null, audit: [], reviewHistory: [], version: 0,
     reviewCycle: { title: 'October 2026 operating review', startedAt: '2026-10-01T00:00:00.000Z' },
     imports: { invoices: sha256(samples.invoices), bank: sha256(samples.bank), cashbook: sha256(samples.cashbook), stock: sha256(samples.stock) },
     updatedAt: new Date().toISOString(),
@@ -55,14 +55,14 @@ export function createFirestoreStore(db) {
       });
     },
     async consumeDemoQuota(uid, kind, limit) {
-      if (!['intake', 'investigate'].includes(kind) || !Number.isInteger(limit) || limit < 1) throw new Error('Invalid demo quota');
+      if (!['intake', 'investigate', 'agent'].includes(kind) || !Number.isInteger(limit) || limit < 1) throw new Error('Invalid demo quota');
       return db.runTransaction(async tx => {
         const doc = ref(uid);
         const snap = await tx.get(doc);
         const state = snap.exists ? snap.data() : seedWorkspace();
-        const usage = { intake: 0, investigate: 0, ...(state.demoUsage || {}) };
+        const usage = { intake: 0, investigate: 0, agent: 0, ...(state.demoUsage || {}) };
         if (usage[kind] >= limit) {
-          const label = kind === 'intake' ? 'Smart Intake extractions' : 'Meta investigations';
+          const label = kind === 'intake' ? 'Smart Intake extractions' : kind === 'agent' ? 'Evidence Agent questions' : 'Meta investigations';
           const error = new Error(`Judge Demo limit reached for ${label}. Resetting the sample does not reset model allowances.`);
           error.status = 429;
           throw error;
@@ -90,6 +90,53 @@ export function createFirestoreStore(db) {
         const oldest = Object.entries(state.briefs).sort((a, b) => a[1].createdAt.localeCompare(b[1].createdAt));
         for (const [id] of oldest.slice(0, Math.max(0, oldest.length - 20))) delete state.briefs[id];
         state.audit = [...(state.audit || []), { action: 'investigated', invoiceId, at: brief.createdAt, sourceFingerprint: brief.sourceFingerprint }].slice(-100);
+        tx.set(doc, state);
+        return state;
+      });
+    },
+    async saveAgentAnswer(uid, expectedVersion, answer) {
+      return db.runTransaction(async tx => {
+        const doc = ref(uid);
+        const snap = await tx.get(doc);
+        if (!snap.exists || snap.data().version !== expectedVersion) {
+          const error = new Error('Workspace changed during retrieval; ask again with current records');
+          error.status = 409;
+          throw error;
+        }
+        const state = snap.data();
+        state.agentAnswers = [...(state.agentAnswers || []), answer].slice(-8);
+        state.audit = [...(state.audit || []), {
+          action: 'rag-asked', at: answer.createdAt, question: answer.question.slice(0, 160),
+          sourceFingerprint: answer.sourceFingerprint, retrievalMode: answer.retrieval?.mode,
+        }].slice(-100);
+        tx.set(doc, state);
+        return state;
+      });
+    },
+    async reviewAgentAnswer(uid, expectedVersion, sourceFingerprint, createdAt) {
+      return db.runTransaction(async tx => {
+        const doc = ref(uid);
+        const snap = await tx.get(doc);
+        if (!snap.exists || snap.data().version !== expectedVersion) {
+          const error = new Error('Workspace changed; reload before confirming the Evidence Agent review');
+          error.status = 409;
+          throw error;
+        }
+        const state = snap.data();
+        const answer = (state.agentAnswers || []).find(item => item.sourceFingerprint === sourceFingerprint && item.createdAt === createdAt);
+        if (!answer) {
+          const error = new Error('Evidence Agent answer changed; ask again before signing off');
+          error.status = 409;
+          throw error;
+        }
+        const reviewedAt = new Date().toISOString();
+        answer.verification = answer.verification || {};
+        answer.verification.humanReview = { status: 'reviewed', reviewedAt, reviewedBy: uid };
+        state.version += 1;
+        state.updatedAt = reviewedAt;
+        state.audit = [...(state.audit || []), {
+          action: 'rag-reviewed', at: reviewedAt, by: uid, sourceFingerprint,
+        }].slice(-100);
         tx.set(doc, state);
         return state;
       });

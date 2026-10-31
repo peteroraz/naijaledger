@@ -28,6 +28,15 @@ function reviewedState() {
       },
     },
   };
+  state.agentAnswers = [{
+    question: 'Why is INV-002 unresolved?', finding: 'The closest bank credit is NGN 1,200 below the invoice.',
+    evidence: [{ sourceId: 'invoice:INV-002', statement: 'INV-002 is NGN 80,000.', title: 'INV-002', locator: 'source row 3' }],
+    calculation: 'NGN 80,000 - NGN 78,800 = NGN 1,200', confidence: 'medium', missingEvidence: ['POS settlement statement'],
+    nextCheck: 'Inspect the POS settlement statement.', decisionBoundary: 'Human approval is required.', model: 'muse-spark-1.3',
+    createdAt: '2026-10-29T14:12:00.000Z', sourceFingerprint: 'c'.repeat(64),
+    retrieval: { mode: 'hybrid-vector', chunksConsidered: 42, selectedCount: 8, evidence: [{ id: 'invoice:INV-002', type: 'invoice', locator: 'source row 3', retrievalReason: 'exact source ID' }] },
+    verification: { status: 'checks_passed', checkedAt: '2026-10-29T14:13:00.000Z', checks: [{ id: 'citations', label: 'Citation integrity', passed: true, detail: '1 citation checked.' }], modelReview: { verdict: 'supported', checkedClaims: 2, issues: [] }, humanReview: { status: 'reviewed', reviewedAt: '2026-10-29T14:16:00.000Z' } },
+  }];
   state.audit = [
     { action: 'approved', invoiceId: 'INV-001', bankId: 'BNK-001', by: 'test-user', at: '2026-10-29T14:00:00.000Z' },
     { action: 'brief-reviewed', invoiceId: 'INV-002', by: 'test-user', at: '2026-10-29T14:15:00.000Z', sourceFingerprint: 'a'.repeat(64) },
@@ -54,13 +63,14 @@ test('review pack Excel workbook preserves source, review, verification, and aud
   assert.deepEqual(workbook.worksheets.map(sheet => sheet.name), [
     'Summary', 'Approved Matches', 'Unresolved Invoices', 'Unresolved Bank', 'Sales Invoices',
     'Bank Transactions', 'Cashbook', 'Cash Deposits', 'Stock Reconciliation', 'Review History',
-    'AI Briefs', 'Verification Checks', 'Audit Trail',
+    'AI Briefs', 'Evidence Agent', 'Verification Checks', 'Audit Trail',
   ]);
   assert.equal(workbook.getWorksheet('Summary').getCell('A1').value, 'NaijaLedger review pack');
   assert.equal(workbook.getWorksheet('Approved Matches').getCell('A2').value, 'INV-001');
   assert.equal(workbook.getWorksheet('Cash Deposits').getCell('A2').value, 'Approved');
   assert.equal(workbook.getWorksheet('Stock Reconciliation').getCell('A2').value, 'RICE-50');
   assert.equal(workbook.getWorksheet('AI Briefs').getCell('A2').value, 'INV-002');
+  assert.match(String(workbook.getWorksheet('Evidence Agent').getCell('B2').value), /INV-002/);
   assert.equal(workbook.getWorksheet('Verification Checks').getCell('D2').value, 'Passed');
   assert.equal(workbook.getWorksheet('Audit Trail').rowCount, 3);
 });
