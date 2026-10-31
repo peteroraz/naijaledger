@@ -1,6 +1,7 @@
 import ExcelJS from 'exceljs';
 import PDFDocument from 'pdfkit';
 import { reconcile } from './reconcile.mjs';
+import { reconcileCashbook, reconcileStock } from './operations.mjs';
 
 const GREEN = '174F3A';
 const LIGHT_GREEN = 'EAF4E9';
@@ -24,16 +25,24 @@ const text = value => String(value ?? '')
   .replace(/[^\x09\x0A\x0D\x20-\x7E]/g, '');
 
 export function createReviewPack(state, generatedAt = new Date().toISOString()) {
+  const cashAllocations = state.cashAllocations || [];
+  const invoiceReview = reconcile(state.invoices, state.bank, state.approved || [], cashAllocations.map(row => row.bankId));
+  const cashReview = reconcileCashbook(state.cashbook || [], state.bank, cashAllocations, [...invoiceReview.matches, ...invoiceReview.proposals].map(row => row.bankId));
+  const cashBankIds = new Set([...cashReview.matches, ...cashReview.proposals].map(row => row.bankId));
   return {
     title: 'NaijaLedger review pack',
     generatedAt,
     status: 'Human review required; not a tax filing or accounting certification',
     sourceHashes: state.imports,
     workspaceVersion: state.version,
-    ...reconcile(state.invoices, state.bank, state.approved),
+    ...invoiceReview,
+    unresolvedBank: invoiceReview.unresolvedBank.filter(row => !cashBankIds.has(row.id)),
     invoices: state.invoices,
     bank: state.bank,
-    approved: state.approved,
+    approved: state.approved || [],
+    cashbook: state.cashbook || [], cashAllocations, cashReview,
+    stockReview: reconcileStock(state.stock || []),
+    reviewCycle: state.reviewCycle || null, reviewHistory: state.reviewHistory || [],
     briefs: state.briefs || {},
     audit: state.audit || [],
     updatedAt: state.updatedAt,
@@ -107,7 +116,9 @@ export async function buildReviewWorkbook(report) {
     ['Bank transactions', report.bank.length, 'Approved matches', report.matches.length],
     ['Unresolved invoices', report.unresolvedInvoices.length, 'Unresolved bank entries', report.unresolvedBank.length],
     ['Invoiced total', amount(report.totals.invoicedKobo), 'Bank credit total', amount(report.totals.bankCreditsKobo)],
-    ['Approved total', amount(report.totals.approvedKobo), 'AI evidence briefs', Object.keys(report.briefs).length],
+    ['Approved invoice total', amount(report.totals.approvedKobo), 'AI evidence briefs', Object.keys(report.briefs).length],
+    ['Cashbook total', amount(report.cashReview.totals.cashSalesKobo), 'Approved cash lodgements', report.cashReview.matches.length],
+    ['Stock items', report.stockReview.summary.totalItems, 'Stock variances', report.stockReview.summary.varianceItems],
   ];
   summary.addRows([[], ['Review summary'], ...summaryRows]);
   const sectionRow = 4;
@@ -116,12 +127,12 @@ export async function buildReviewWorkbook(report) {
     cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: `FF${GREEN}` } };
     cell.font = { name: 'Arial', size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
   });
-  for (let row = 5; row <= 10; row += 1) {
+  for (let row = 5; row <= 12; row += 1) {
     summary.getRow(row).font = { name: 'Arial', size: 10, color: { argb: `FF${TEXT}` } };
     summary.getCell(`A${row}`).font = { name: 'Arial', size: 10, bold: true, color: { argb: `FF${MUTED}` } };
     summary.getCell(`C${row}`).font = { name: 'Arial', size: 10, bold: true, color: { argb: `FF${MUTED}` } };
   }
-  ['B9', 'D9', 'B10'].forEach(ref => { summary.getCell(ref).numFmt = MONEY_FORMAT; });
+  ['B9', 'D9', 'B10', 'B11'].forEach(ref => { summary.getCell(ref).numFmt = MONEY_FORMAT; });
   ['B5', 'B6'].forEach(ref => { summary.getCell(ref).numFmt = 'yyyy-mm-dd hh:mm'; });
   summary.addRow([]);
   const hashHeading = summary.addRow(['Source fingerprints']);
@@ -132,7 +143,11 @@ export async function buildReviewWorkbook(report) {
   summary.mergeCells(`B${summary.rowCount}:D${summary.rowCount}`);
   summary.addRow(['Bank transactions SHA-256', report.sourceHashes?.bank || 'Not available']);
   summary.mergeCells(`B${summary.rowCount}:D${summary.rowCount}`);
-  summary.getRows(hashHeading.number + 1, 2).forEach(row => {
+  summary.addRow(['Cashbook SHA-256', report.sourceHashes?.cashbook || 'Not available']);
+  summary.mergeCells(`B${summary.rowCount}:D${summary.rowCount}`);
+  summary.addRow(['Stock SHA-256', report.sourceHashes?.stock || 'Not available']);
+  summary.mergeCells(`B${summary.rowCount}:D${summary.rowCount}`);
+  summary.getRows(hashHeading.number + 1, 4).forEach(row => {
     row.font = { name: 'Arial', size: 9, color: { argb: `FF${TEXT}` } };
     row.getCell(1).font = { name: 'Arial', size: 9, bold: true, color: { argb: `FF${MUTED}` } };
   });
@@ -173,6 +188,30 @@ export async function buildReviewWorkbook(report) {
   addRowsSheet(workbook, 'Unresolved Bank', sourceColumns('Description', 'description'), bankRows(report.unresolvedBank), { A: 15, B: 15, C: 48, D: 18, E: 13 });
   addRowsSheet(workbook, 'Sales Invoices', invoiceColumns, invoiceRows(report.invoices), { A: 15, B: 15, C: 32, D: 18, E: 13, F: 30, G: 15, H: 20, I: 20, J: 68, K: 24 });
   addRowsSheet(workbook, 'Bank Transactions', sourceColumns('Description', 'description'), bankRows(report.bank), { A: 15, B: 15, C: 48, D: 18, E: 13 });
+  addRowsSheet(workbook, 'Cashbook', [
+    { header: 'Cash ID', key: 'id' }, { header: 'Date', key: 'date', style: { numFmt: 'yyyy-mm-dd' } }, { header: 'Customer / source', key: 'customer' },
+    { header: 'Description', key: 'description' }, { header: 'Amount (NGN)', key: 'amount', style: { numFmt: MONEY_FORMAT } }, { header: 'Source row', key: 'sourceRow' },
+    { header: 'Source name', key: 'sourceName' }, { header: 'Source SHA-256', key: 'sourceHash' },
+  ], report.cashbook.map(row => ({ ...row, date: dateValue(row.date), amount: amount(row.amountKobo) })), { A: 16, B: 15, C: 28, D: 40, E: 18, F: 12, G: 28, H: 68 });
+  addRowsSheet(workbook, 'Cash Deposits', [
+    { header: 'Status', key: 'status' }, { header: 'Frequency', key: 'frequency' }, { header: 'Cash entry IDs', key: 'cashEntryIds' },
+    { header: 'Bank ID', key: 'bankId' }, { header: 'Period start', key: 'startDate' }, { header: 'Period end', key: 'endDate' },
+    { header: 'Amount (NGN)', key: 'amount', style: { numFmt: MONEY_FORMAT } }, { header: 'Evidence rule', key: 'reason' },
+  ], [
+    ...report.cashReview.matches.map(row => ({ ...row, status: 'Approved', cashEntryIds: row.cashEntryIds.join(', '), amount: amount(row.amountKobo), reason: 'Human-approved exact cashbook-to-bank lodgement' })),
+    ...report.cashReview.proposals.map(row => ({ ...row, status: 'Proposed - review required', cashEntryIds: row.cashEntryIds.join(', '), amount: amount(row.amountKobo) })),
+  ], { A: 24, B: 14, C: 38, D: 15, E: 15, F: 15, G: 18, H: 62 });
+  addRowsSheet(workbook, 'Stock Reconciliation', [
+    { header: 'SKU', key: 'sku' }, { header: 'Item', key: 'item' }, { header: 'Unit', key: 'unit' },
+    { header: 'Opening', key: 'openingQty' }, { header: 'Received', key: 'receivedQty' }, { header: 'Sold', key: 'soldQty' },
+    { header: 'Adjustment', key: 'adjustmentQty' }, { header: 'Expected', key: 'expectedQty' }, { header: 'Counted', key: 'countedQty' },
+    { header: 'Variance', key: 'varianceQty' }, { header: 'Status', key: 'status' },
+  ], report.stockReview.items, { A: 15, B: 32, C: 12, D: 12, E: 12, F: 12, G: 13, H: 13, I: 13, J: 13, K: 14 });
+  addRowsSheet(workbook, 'Review History', [
+    { header: 'Review ID', key: 'id' }, { header: 'Title', key: 'title' }, { header: 'Started', key: 'startedAt' }, { header: 'Completed', key: 'completedAt' },
+    { header: 'Invoices', key: 'invoices' }, { header: 'Cash entries', key: 'cashbook' }, { header: 'Bank rows', key: 'bank' }, { header: 'Stock items', key: 'stock' },
+    { header: 'Reviewed settlement (NGN)', key: 'settlement', style: { numFmt: MONEY_FORMAT } }, { header: 'Stock variances', key: 'stockVariances' },
+  ], report.reviewHistory.map(row => ({ ...row, startedAt: dateValue(row.startedAt), completedAt: dateValue(row.completedAt), ...row.counts, settlement: amount(row.totals.approvedInvoiceKobo + row.totals.bankedCashKobo), stockVariances: row.results.stockVarianceItems })), { A: 22, B: 28, C: 21, D: 21, E: 11, F: 13, G: 11, H: 12, I: 24, J: 16 });
 
   const briefRows = Object.entries(report.briefs).map(([invoiceId, brief]) => ({
     invoiceId, createdAt: dateValue(brief.createdAt), model: brief.model, briefStatus: brief.status,
@@ -309,11 +348,15 @@ export async function buildReviewPdf(report) {
       ['Unresolved invoices', report.unresolvedInvoices.length, 'Unresolved bank entries', report.unresolvedBank.length],
       ['Invoiced total', ngn(report.totals.invoicedKobo), 'Bank credit total', ngn(report.totals.bankCreditsKobo)],
       ['Approved total', ngn(report.totals.approvedKobo), 'AI evidence briefs', Object.keys(report.briefs).length],
+      ['Cashbook total', ngn(report.cashReview.totals.cashSalesKobo), 'Approved cash deposits', report.cashReview.matches.length],
+      ['Stock items', report.stockReview.summary.totalItems, 'Stock variances', report.stockReview.summary.varianceItems],
     ], [112, 126, 112, 126], ['left', 'right', 'left', 'right']);
 
     section('Source fingerprints');
     paragraph(`Sales invoices SHA-256: ${report.sourceHashes?.invoices || 'Not available'}`, { size: 7.8 });
     paragraph(`Bank transactions SHA-256: ${report.sourceHashes?.bank || 'Not available'}`, { size: 7.8 });
+    paragraph(`Cashbook SHA-256: ${report.sourceHashes?.cashbook || 'Not available'}`, { size: 7.8 });
+    paragraph(`Stock SHA-256: ${report.sourceHashes?.stock || 'Not available'}`, { size: 7.8 });
 
     const invoiceById = new Map(report.invoices.map(row => [row.id, row]));
     const bankById = new Map(report.bank.map(row => [row.id, row]));
@@ -330,6 +373,27 @@ export async function buildReviewPdf(report) {
     section('Unresolved bank entries');
     if (report.unresolvedBank.length) pdfTable(doc, ['Bank record', 'Date', 'Description', 'Source row', 'Amount'], report.unresolvedBank.map(row => [row.id, row.date, row.description, row.sourceRow, ngn(row.amountKobo)]), [68, 72, 184, 70, 82], ['left', 'left', 'left', 'right', 'right']);
     else paragraph('No unresolved bank entries.', { color: `#${MUTED}` });
+
+    section('Cashbook and bank lodgements');
+    if (report.cashReview.matches.length) pdfTable(doc, ['Status', 'Cash entries', 'Period', 'Bank record', 'Amount'], report.cashReview.matches.map(row => [
+      'Approved', row.cashEntryIds.join(', '), `${row.startDate} to ${row.endDate}`, row.bankId, ngn(row.amountKobo),
+    ]), [62, 144, 110, 78, 82], ['left', 'left', 'left', 'left', 'right']);
+    if (report.cashReview.proposals.length) pdfTable(doc, ['Status', 'Cash entries', 'Period', 'Bank record', 'Amount'], report.cashReview.proposals.map(row => [
+      'Proposed', row.cashEntryIds.join(', '), `${row.startDate} to ${row.endDate}`, row.bankId, ngn(row.amountKobo),
+    ]), [62, 144, 110, 78, 82], ['left', 'left', 'left', 'left', 'right']);
+    if (!report.cashReview.matches.length && !report.cashReview.proposals.length) paragraph('No cash-lodgement matches or proposals.', { color: `#${MUTED}` });
+
+    section('Stock reconciliation');
+    if (report.stockReview.items.length) pdfTable(doc, ['SKU', 'Item', 'Expected', 'Counted', 'Variance', 'Status'], report.stockReview.items.map(row => [
+      row.sku, row.item, row.expectedQty, row.countedQty, row.varianceQty, row.status,
+    ]), [68, 190, 58, 58, 58, 44], ['left', 'left', 'right', 'right', 'right', 'left']);
+    else paragraph('No stock records loaded.', { color: `#${MUTED}` });
+
+    section('Completed review history');
+    if (report.reviewHistory.length) pdfTable(doc, ['Completed', 'Review', 'Sources', 'Reviewed settlement', 'Stock exceptions'], report.reviewHistory.map(row => [
+      iso(row.completedAt).slice(0, 10), row.title, `${row.counts.invoices} inv / ${row.counts.cashbook} cash / ${row.counts.bank} bank`, ngn(row.totals.approvedInvoiceKobo + row.totals.bankedCashKobo), row.results.stockVarianceItems,
+    ]), [72, 128, 116, 104, 56], ['left', 'left', 'left', 'right', 'right']);
+    else paragraph('No completed review cycles yet.', { color: `#${MUTED}` });
 
     section('Meta evidence briefs and verification receipts');
     const briefs = Object.entries(report.briefs);

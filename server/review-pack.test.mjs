@@ -9,6 +9,7 @@ function reviewedState() {
   state.version = 3;
   state.updatedAt = '2026-10-29T14:17:00.000Z';
   state.approved = [{ invoiceId: 'INV-001', bankId: 'BNK-001', reviewedAt: '2026-10-29T14:00:00.000Z', reviewedBy: 'test-user' }];
+  state.cashAllocations = [{ cashEntryIds: ['CASH-001', 'CASH-002'], bankId: 'BNK-008', reviewedAt: '2026-10-29T14:02:00.000Z', reviewedBy: 'test-user', frequency: 'daily' }];
   state.briefs = {
     'INV-002': {
       summary: 'BNK-004 may be a net settlement, with a difference requiring human evidence.',
@@ -52,10 +53,13 @@ test('review pack Excel workbook preserves source, review, verification, and aud
   await workbook.xlsx.load(file);
   assert.deepEqual(workbook.worksheets.map(sheet => sheet.name), [
     'Summary', 'Approved Matches', 'Unresolved Invoices', 'Unresolved Bank', 'Sales Invoices',
-    'Bank Transactions', 'AI Briefs', 'Verification Checks', 'Audit Trail',
+    'Bank Transactions', 'Cashbook', 'Cash Deposits', 'Stock Reconciliation', 'Review History',
+    'AI Briefs', 'Verification Checks', 'Audit Trail',
   ]);
   assert.equal(workbook.getWorksheet('Summary').getCell('A1').value, 'NaijaLedger review pack');
   assert.equal(workbook.getWorksheet('Approved Matches').getCell('A2').value, 'INV-001');
+  assert.equal(workbook.getWorksheet('Cash Deposits').getCell('A2').value, 'Approved');
+  assert.equal(workbook.getWorksheet('Stock Reconciliation').getCell('A2').value, 'RICE-50');
   assert.equal(workbook.getWorksheet('AI Briefs').getCell('A2').value, 'INV-002');
   assert.equal(workbook.getWorksheet('Verification Checks').getCell('D2').value, 'Passed');
   assert.equal(workbook.getWorksheet('Audit Trail').rowCount, 3);

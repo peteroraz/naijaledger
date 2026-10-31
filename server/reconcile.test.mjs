@@ -3,9 +3,9 @@ const sample=(name,kind)=>parseCsv(readFileSync(new URL(`../samples/${name}.csv`
 test('uses integer kobo and rejects unsupported precision',()=>{assert.equal(parseKobo('₦1,234.50'),123450);assert.throws(()=>parseKobo('1.234'));});
 test('sample totals and exact proposals; net receipts and non-sales remain unresolved',()=>{
  const result=reconcile(sample('invoices','invoices'),sample('bank','bank'));
- assert.equal(result.totals.invoicedKobo,42500000);assert.equal(result.totals.bankCreditsKobo,47380000);
+ assert.equal(result.totals.invoicedKobo,42500000);assert.equal(result.totals.bankCreditsKobo,58780000);
  assert.deepEqual(result.proposals.map(x=>x.invoiceId),['INV-001','INV-003','INV-004']);
- assert.equal(result.unresolvedInvoices.length,3);assert.equal(result.unresolvedBank.length,4);
+ assert.equal(result.unresolvedInvoices.length,3);assert.equal(result.unresolvedBank.length,6);
 });
 test('same-size invoices never silently compete for one credit',()=>{const invoice={id:'a',date:'2026-10-01',amountKobo:100};assert.equal(reconcile([invoice,{...invoice,id:'b'}],[{id:'c',date:'2026-10-02',amountKobo:100}]).proposals.length,0);});
 test('approvals cannot reuse source or approve wrong amount',()=>{

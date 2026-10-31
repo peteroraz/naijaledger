@@ -10,10 +10,10 @@ export function parseKobo(value) {
 
 export function formatNaira(kobo) { return `₦${(kobo / 100).toLocaleString('en-NG', {minimumFractionDigits:2,maximumFractionDigits:2})}`; }
 
-export function reconcile(invoices, bank, approved = []) {
+export function reconcile(invoices, bank, approved = [], blockedBankIds = []) {
   const invoiceIds = new Set(invoices.map(x=>x.id));
   const creditIds = new Set(bank.filter(x=>x.amountKobo>0).map(x=>x.id));
-  const usedInvoices = new Set(); const usedCredits = new Set();
+  const usedInvoices = new Set(); const usedCredits = new Set(blockedBankIds);
   const matches = [];
   for (const allocation of approved) {
     if (!invoiceIds.has(allocation.invoiceId) || !creditIds.has(allocation.bankId)) throw new Error('Approval references missing source');

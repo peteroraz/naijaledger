@@ -4,14 +4,17 @@ import { fileURLToPath } from 'node:url';
 import { parseCsv, sha256 } from './csv.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const samples = Object.fromEntries(['invoices', 'bank'].map(kind => [kind, readFileSync(join(here, `../samples/${kind}.csv`), 'utf8')]));
+const samples = Object.fromEntries(['invoices', 'bank', 'cashbook', 'stock'].map(kind => [kind, readFileSync(join(here, `../samples/${kind}.csv`), 'utf8')]));
 
 export function seedWorkspace() {
   return {
     invoices: parseCsv(samples.invoices, 'invoices'),
     bank: parseCsv(samples.bank, 'bank'),
-    approved: [], briefs: {}, intakeDraft: null, audit: [], version: 0,
-    imports: { invoices: sha256(samples.invoices), bank: sha256(samples.bank) },
+    cashbook: parseCsv(samples.cashbook, 'cashbook'),
+    stock: parseCsv(samples.stock, 'stock'),
+    approved: [], cashAllocations: [], briefs: {}, intakeDraft: null, audit: [], reviewHistory: [], version: 0,
+    reviewCycle: { title: 'October 2026 operating review', startedAt: '2026-10-01T00:00:00.000Z' },
+    imports: { invoices: sha256(samples.invoices), bank: sha256(samples.bank), cashbook: sha256(samples.cashbook), stock: sha256(samples.stock) },
     updatedAt: new Date().toISOString(),
   };
 }

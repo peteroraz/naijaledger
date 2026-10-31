@@ -6,17 +6,27 @@ import { parseCsv, sha256 } from './csv.mjs';
 import { extractInvoiceIntake, INTAKE_LIMITS } from './intake.mjs';
 import { reconcile } from './reconcile.mjs';
 import { evidenceFor, investigateWithMeta } from './meta.mjs';
+import { reconcileCashbook, reconcileStock, reviewCycleSnapshot } from './operations.mjs';
 import { buildReviewPdf, buildReviewWorkbook, createReviewPack } from './review-pack.mjs';
 import { seedWorkspace } from './store.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 export const DEMO_LIMITS = Object.freeze({ intake: 3, investigate: 5 });
-const view = (state, isDemo = false) => ({ ...reconcile(state.invoices, state.bank, state.approved),
+const view = (state, isDemo = false) => {
+  const cashbook = state.cashbook || [];
+  const cashAllocations = state.cashAllocations || [];
+  const invoiceReview = reconcile(state.invoices, state.bank, state.approved || [], cashAllocations.map(row => row.bankId));
+  const cashReview = reconcileCashbook(cashbook, state.bank, cashAllocations, [...invoiceReview.matches, ...invoiceReview.proposals].map(row => row.bankId));
+  const cashBankIds = new Set([...cashReview.matches, ...cashReview.proposals].map(row => row.bankId));
+  return { ...invoiceReview, unresolvedBank: invoiceReview.unresolvedBank.filter(row => !cashBankIds.has(row.id)),
   invoices: state.invoices, bank: state.bank, approved: state.approved,
+  cashbook, cashAllocations, cashReview, stockReview: reconcileStock(state.stock || []),
+  reviewCycle: state.reviewCycle || { title: 'Current review', startedAt: state.updatedAt }, reviewHistory: state.reviewHistory || [],
   version: state.version, imports: state.imports, briefs: state.briefs || {}, intakeDraft: state.intakeDraft || null,
   audit: state.audit || [], updatedAt: state.updatedAt,
   demo: { isDemo, limits: DEMO_LIMITS, usage: { intake: 0, investigate: 0, ...(state.demoUsage || {}) } },
-});
+  };
+};
 const route = fn => (req, res, next) => Promise.resolve().then(() => fn(req, res, next)).catch(next);
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -29,30 +39,34 @@ function validDate(value) {
   return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
 }
 
-function reviewedInvoiceRows(requested, draft, existing) {
+function reviewedIntakeRows(requested, draft, existingInvoices, existingCashbook) {
   if (!Array.isArray(requested) || !requested.length || requested.length > 100) {
-    const error = new Error('Select between 1 and 100 extracted invoices'); error.status = 400; throw error;
+    const error = new Error('Select between 1 and 100 extracted sales records'); error.status = 400; throw error;
   }
   const candidates = new Map((draft?.candidates || []).map(row => [row.draftId, row]));
-  const usedIds = new Set(existing.map(row => row.id));
+  const usedInvoiceIds = new Set(existingInvoices.map(row => row.id));
+  const usedCashIds = new Set(existingCashbook.map(row => row.id));
+  const offsets = { invoice: existingInvoices.length, cash_sale: existingCashbook.length };
   return requested.map((row, index) => {
     const source = candidates.get(row?.draftId);
     if (!source) { const error = new Error('An extracted row is no longer in the current draft'); error.status = 409; throw error; }
+    const recordType = row.recordType === 'cash_sale' ? 'cash_sale' : 'invoice';
+    const usedIds = recordType === 'cash_sale' ? usedCashIds : usedInvoiceIds;
     const id = String(row.invoiceId || '').trim().slice(0, 80);
     const date = String(row.date || '').trim();
     const customer = String(row.customer || '').replace(/\s+/g, ' ').trim().slice(0, 160);
     const amountKobo = Number(row.amountKobo);
-    if (!id || usedIds.has(id)) { const error = new Error(`Row ${index + 1}: invoice ID is missing or already used`); error.status = 400; throw error; }
+    if (!id || usedIds.has(id)) { const error = new Error(`Row ${index + 1}: record ID is missing or already used`); error.status = 400; throw error; }
     if (!validDate(date)) { const error = new Error(`Row ${index + 1}: confirm a valid date`); error.status = 400; throw error; }
     if (!customer) { const error = new Error(`Row ${index + 1}: confirm the customer`); error.status = 400; throw error; }
     if (!Number.isSafeInteger(amountKobo) || amountKobo <= 0) { const error = new Error(`Row ${index + 1}: confirm a positive NGN amount`); error.status = 400; throw error; }
     usedIds.add(id);
     return {
-      id, date, customer, amountKobo, sourceRow: existing.length + index + 2,
+      recordType, record: { id, date, customer, amountKobo, sourceRow: offsets[recordType] + index + 2,
       description: source.description || '',
       sourceType: source.sourceType, sourceName: source.sourceLabel,
       sourceHash: source.sourceHash, sourceLocator: source.sourceLocator,
-      confidence: source.confidence, extractionModel: source.extractionModel,
+      confidence: source.confidence, extractionModel: source.extractionModel },
     };
   });
 }
@@ -142,14 +156,19 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
       if (!current.intakeDraft || current.intakeDraft.id !== draftId) {
         const error = new Error('The extraction draft changed; review the current draft'); error.status = 409; throw error;
       }
-      const accepted = reviewedInvoiceRows(rows, current.intakeDraft, current.invoices);
-      current.invoices = [...current.invoices, ...accepted];
+      const accepted = reviewedIntakeRows(rows, current.intakeDraft, current.invoices, current.cashbook || []);
+      const invoices = accepted.filter(row => row.recordType === 'invoice').map(row => row.record);
+      const cashSales = accepted.filter(row => row.recordType === 'cash_sale').map(row => row.record);
+      current.invoices = [...current.invoices, ...invoices];
+      current.cashbook = [...(current.cashbook || []), ...cashSales];
       current.imports.invoices = sha256(JSON.stringify(current.invoices));
+      current.imports.cashbook = sha256(JSON.stringify(current.cashbook));
       current.approved = current.approved || [];
+      current.cashAllocations = current.cashAllocations || [];
       current.briefs = {};
       current.audit = [...(current.audit || []), {
-        action: 'intake-committed', at: new Date().toISOString(), rows: accepted.length,
-        sources: new Set(accepted.map(row => row.sourceHash)).size,
+        action: 'intake-committed', at: new Date().toISOString(), rows: accepted.length, invoices: invoices.length, cashSales: cashSales.length,
+        sources: new Set(accepted.map(row => row.record.sourceHash)).size,
         sourceFingerprint: current.intakeDraft.sourceFingerprint,
         by: req.uid,
       }].slice(-100);
@@ -172,12 +191,14 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
   }));
   app.post('/api/import/:kind', route(async (req, res) => {
     const kind = req.params.kind;
-    if (!['invoices', 'bank'].includes(kind) || typeof req.body?.csv !== 'string') return res.status(400).json({ error: 'Expected invoices or bank CSV' });
+    if (!['invoices', 'bank', 'cashbook', 'stock'].includes(kind) || typeof req.body?.csv !== 'string') return res.status(400).json({ error: 'Expected invoices, bank, cashbook or stock CSV' });
     const rows = parseCsv(req.body.csv, kind);
     const state = await store.change(req.uid, req.body.version, current => {
       current[kind] = rows;
       current.imports[kind] = sha256(req.body.csv);
-      current.approved = []; current.briefs = {};
+      if (['invoices', 'bank'].includes(kind)) current.approved = [];
+      if (['bank', 'cashbook'].includes(kind)) current.cashAllocations = [];
+      current.briefs = {};
       if (kind === 'invoices') current.intakeDraft = null;
       current.audit = [...(current.audit || []), { action: 'imported', kind, rows: rows.length, sourceHash: current.imports[kind], at: new Date().toISOString() }].slice(-100);
       return current;
@@ -187,12 +208,64 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
   app.post('/api/approvals', route(async (req, res) => {
     const { invoiceId, bankId, version } = req.body || {};
     const state = await store.change(req.uid, version, current => {
-      const proposal = reconcile(current.invoices, current.bank, current.approved).proposals
+      const proposal = reconcile(current.invoices, current.bank, current.approved || [], (current.cashAllocations || []).map(row => row.bankId)).proposals
         .find(p => p.invoiceId === invoiceId && p.bankId === bankId);
       if (!proposal) { const error = new Error('Pair is not an available proposal'); error.status = 400; throw error; }
       current.approved.push({ invoiceId, bankId, reviewedAt: new Date().toISOString(), reviewedBy: req.uid });
       current.briefs = {};
       current.audit = [...(current.audit || []), { action: 'approved', invoiceId, bankId, by: req.uid, at: new Date().toISOString() }].slice(-100);
+      return current;
+    });
+    res.json(view(state, req.isAnonymous));
+  }));
+  app.post('/api/cash-deposits', route(async (req, res) => {
+    const { cashEntryIds, bankId, version } = req.body || {};
+    const state = await store.change(req.uid, version, current => {
+      const invoiceReview = reconcile(current.invoices, current.bank, current.approved || [], (current.cashAllocations || []).map(row => row.bankId));
+      const proposal = reconcileCashbook(current.cashbook || [], current.bank, current.cashAllocations || [], [...invoiceReview.matches, ...invoiceReview.proposals].map(row => row.bankId)).proposals
+        .find(row => row.bankId === bankId && JSON.stringify(row.cashEntryIds) === JSON.stringify(cashEntryIds));
+      if (!proposal) { const error = new Error('Cash lodgement is not an available proposal'); error.status = 400; throw error; }
+      current.cashAllocations = [...(current.cashAllocations || []), { cashEntryIds, bankId, reviewedAt: new Date().toISOString(), reviewedBy: req.uid, frequency: proposal.frequency }];
+      current.audit = [...(current.audit || []), { action: 'cash-deposit-approved', bankId, cashEntryIds, rows: cashEntryIds.length, by: req.uid, at: new Date().toISOString() }].slice(-100);
+      return current;
+    });
+    res.json(view(state, req.isAnonymous));
+  }));
+  app.post('/api/stock', route(async (req, res) => {
+    const requested = req.body?.rows;
+    if (!Array.isArray(requested) || requested.length > 200) return res.status(400).json({ error: 'Stock count must contain 0 to 200 items' });
+    const ids = new Set();
+    const rows = requested.map((row, index) => {
+      const sku = String(row?.sku || '').trim().slice(0, 80);
+      const item = String(row?.item || '').replace(/\s+/g, ' ').trim().slice(0, 160);
+      const unit = String(row?.unit || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+      if (!sku || ids.has(sku) || !item || !unit) { const error = new Error(`Stock row ${index + 1}: confirm a unique SKU, item and unit`); error.status = 400; throw error; }
+      ids.add(sku);
+      const quantity = name => {
+        const value = Number(row?.[name]);
+        if (!Number.isFinite(value) || Math.abs(value) > 1_000_000 || (name !== 'adjustmentQty' && value < 0)) { const error = new Error(`Stock row ${index + 1}: invalid quantity`); error.status = 400; throw error; }
+        return Math.round(value * 1000) / 1000;
+      };
+      return { sku, item, unit, openingQty: quantity('openingQty'), receivedQty: quantity('receivedQty'), soldQty: quantity('soldQty'), adjustmentQty: quantity('adjustmentQty'), countedQty: quantity('countedQty'), sourceRow: index + 2 };
+    });
+    const state = await store.change(req.uid, req.body?.version, current => {
+      current.stock = rows; current.imports.stock = sha256(JSON.stringify(rows));
+      current.audit = [...(current.audit || []), { action: 'stock-count-saved', rows: rows.length, by: req.uid, at: new Date().toISOString() }].slice(-100);
+      return current;
+    });
+    res.json(view(state, req.isAnonymous));
+  }));
+  app.post('/api/review-cycles/complete', route(async (req, res) => {
+    const title = String(req.body?.title || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+    if (!title) return res.status(400).json({ error: 'Name the completed review period' });
+    const state = await store.change(req.uid, req.body?.version, current => {
+      const completedAt = new Date().toISOString();
+      const snapshot = reviewCycleSnapshot(current, title, completedAt);
+      current.reviewHistory = [...(current.reviewHistory || []), snapshot].slice(-12);
+      current.invoices = []; current.bank = []; current.cashbook = []; current.stock = [];
+      current.approved = []; current.cashAllocations = []; current.briefs = {}; current.intakeDraft = null; current.imports = {};
+      current.reviewCycle = { title: 'New review', startedAt: completedAt };
+      current.audit = [{ action: 'review-cycle-started', at: completedAt, completedReviewId: snapshot.id, by: req.uid }];
       return current;
     });
     res.json(view(state, req.isAnonymous));

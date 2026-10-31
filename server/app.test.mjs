@@ -261,3 +261,39 @@ test('human evidence-brief sign-off is versioned and retained in the audit trail
     error => error.status === 409,
   );
 });
+
+test('cash lodgements, stock counts, and completed review history are versioned end to end', async () => {
+  const store = createFirestoreStore(fakeFirestore());
+  const { server, url } = await serve(store, async () => { throw new Error('Model not used'); });
+  const request = async (path, body) => {
+    const response = await fetch(`${url}/api${path}`, {
+      method: body ? 'POST' : 'GET', headers: { Authorization: 'Bearer alice', 'Content-Type': 'application/json' },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+    return { status: response.status, data: await response.json() };
+  };
+  try {
+    const initial = (await request('/workspace')).data;
+    assert.deepEqual(initial.cashReview.proposals.map(row => row.bankId), ['BNK-008', 'BNK-009']);
+    assert.equal(initial.stockReview.summary.varianceItems, 2);
+
+    const cash = await request('/cash-deposits', { cashEntryIds: ['CASH-001', 'CASH-002'], bankId: 'BNK-008', version: initial.version });
+    assert.equal(cash.status, 200, JSON.stringify(cash.data));
+    assert.equal(cash.data.cashReview.matches.length, 1);
+    assert.equal(cash.data.unresolvedBank.some(row => row.id === 'BNK-008'), false);
+
+    const stockRows = cash.data.stockReview.items.map(row => ({ ...row, countedQty: row.expectedQty }));
+    const stock = await request('/stock', { rows: stockRows, version: cash.data.version });
+    assert.equal(stock.status, 200, JSON.stringify(stock.data));
+    assert.equal(stock.data.stockReview.summary.varianceItems, 0);
+
+    const completed = await request('/review-cycles/complete', { title: 'October 2026 close', version: stock.data.version });
+    assert.equal(completed.status, 200, JSON.stringify(completed.data));
+    assert.equal(completed.data.reviewHistory.length, 1);
+    assert.equal(completed.data.reviewHistory[0].results.approvedCashDeposits, 1);
+    assert.equal(completed.data.invoices.length, 0);
+    assert.equal(completed.data.bank.length, 0);
+    assert.equal(completed.data.cashbook.length, 0);
+    assert.equal(completed.data.stockReview.items.length, 0);
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});
