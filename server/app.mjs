@@ -7,11 +7,12 @@ import { extractInvoiceIntake, INTAKE_LIMITS } from './intake.mjs';
 import { reconcile } from './reconcile.mjs';
 import { evidenceFor, investigateWithMeta } from './meta.mjs';
 import { reconcileCashbook, reconcileStock, reviewCycleSnapshot } from './operations.mjs';
+import { createRagAgent } from './rag.mjs';
 import { buildReviewPdf, buildReviewWorkbook, createReviewPack } from './review-pack.mjs';
 import { seedWorkspace } from './store.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
-export const DEMO_LIMITS = Object.freeze({ intake: 3, investigate: 5 });
+export const DEMO_LIMITS = Object.freeze({ intake: 3, investigate: 5, agent: 3 });
 const view = (state, isDemo = false) => {
   const cashbook = state.cashbook || [];
   const cashAllocations = state.cashAllocations || [];
@@ -22,9 +23,9 @@ const view = (state, isDemo = false) => {
   invoices: state.invoices, bank: state.bank, approved: state.approved,
   cashbook, cashAllocations, cashReview, stockReview: reconcileStock(state.stock || []),
   reviewCycle: state.reviewCycle || { title: 'Current review', startedAt: state.updatedAt }, reviewHistory: state.reviewHistory || [],
-  version: state.version, imports: state.imports, briefs: state.briefs || {}, intakeDraft: state.intakeDraft || null,
+  version: state.version, imports: state.imports, briefs: state.briefs || {}, agentAnswers: state.agentAnswers || [], intakeDraft: state.intakeDraft || null,
   audit: state.audit || [], updatedAt: state.updatedAt,
-  demo: { isDemo, limits: DEMO_LIMITS, usage: { intake: 0, investigate: 0, ...(state.demoUsage || {}) } },
+  demo: { isDemo, limits: DEMO_LIMITS, usage: { intake: 0, investigate: 0, agent: 0, ...(state.demoUsage || {}) } },
   };
 };
 const route = fn => (req, res, next) => Promise.resolve().then(() => fn(req, res, next)).catch(next);
@@ -71,7 +72,7 @@ function reviewedIntakeRows(requested, draft, existingInvoices, existingCashbook
   });
 }
 
-export function createApp({ verifyToken, store, investigate = investigateWithMeta, extractIntake = extractInvoiceIntake }) {
+export function createApp({ verifyToken, store, investigate = investigateWithMeta, extractIntake = extractInvoiceIntake, ragAgent = createRagAgent() }) {
   const app = express();
   app.set('trust proxy', 1);
   const publicDemoBuckets = new Map();
@@ -127,7 +128,7 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
       const resetAt = new Date().toISOString();
       return {
         ...seedWorkspace(),
-        demoUsage: current.demoUsage || { intake: 0, investigate: 0 },
+        demoUsage: current.demoUsage || { intake: 0, investigate: 0, agent: 0 },
         audit: [{ action: 'demo-reset', at: resetAt }],
         updatedAt: resetAt,
       };
@@ -280,6 +281,25 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
     const brief = await investigate(evidence);
     const saved = await store.saveBrief(req.uid, version, invoiceId, brief);
     res.json({ invoiceId, brief, workspace: view(saved, req.isAnonymous) });
+  }));
+  app.post('/api/agent/query', route(async (req, res) => {
+    const question = String(req.body?.question || '').replace(/\s+/g, ' ').trim();
+    const version = Number(req.body?.version);
+    if (question.length < 4 || question.length > 600) return res.status(400).json({ error: 'Ask a question between 4 and 600 characters' });
+    const state = await store.get(req.uid);
+    if (state.version !== version) return res.status(409).json({ error: 'Workspace changed; reload before asking the Evidence Agent' });
+    await consumeDemoModelCall(req, 'agent');
+    const answer = await ragAgent.answer({ uid: req.uid, state, question });
+    const saved = await store.saveAgentAnswer(req.uid, version, answer);
+    res.json({ answer, workspace: view(saved, req.isAnonymous) });
+  }));
+  app.post('/api/agent/reviews', route(async (req, res) => {
+    const { sourceFingerprint, createdAt, version } = req.body || {};
+    if (typeof sourceFingerprint !== 'string' || typeof createdAt !== 'string') {
+      return res.status(400).json({ error: 'Select a current Evidence Agent answer' });
+    }
+    const state = await store.reviewAgentAnswer(req.uid, version, sourceFingerprint, createdAt);
+    res.json(view(state, req.isAnonymous));
   }));
   app.post('/api/brief-reviews', route(async (req, res) => {
     const { invoiceId, sourceFingerprint, version } = req.body || {};

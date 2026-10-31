@@ -24,8 +24,8 @@ function fakeFirestore() {
   };
 }
 
-async function serve(store, investigate, extractIntake) {
-  const app = createApp({ store, investigate, ...(extractIntake ? { extractIntake } : {}), verifyToken: async token => {
+async function serve(store, investigate, extractIntake, ragAgent) {
+  const app = createApp({ store, investigate, ...(extractIntake ? { extractIntake } : {}), ...(ragAgent ? { ragAgent } : {}), verifyToken: async token => {
     if (token === 'judge') return { uid: 'judge', isAnonymous: true };
     if (!['alice', 'bob'].includes(token)) throw new Error('Invalid token');
     return { uid: token, isAnonymous: false };
@@ -60,8 +60,8 @@ test('Judge Demo is isolated, bounded, resettable, and cannot refresh model allo
     const initial = await request('judge', '/workspace');
     assert.equal(initial.status, 200);
     assert.equal(initial.data.demo.isDemo, true);
-    assert.deepEqual(initial.data.demo.limits, { intake: 3, investigate: 5 });
-    assert.deepEqual(initial.data.demo.usage, { intake: 0, investigate: 0 });
+    assert.deepEqual(initial.data.demo.limits, { intake: 3, investigate: 5, agent: 3 });
+    assert.deepEqual(initial.data.demo.usage, { intake: 0, investigate: 0, agent: 0 });
 
     const approved = await request('judge', '/approvals', { invoiceId: 'INV-001', bankId: 'BNK-001', version: initial.data.version });
     assert.equal(approved.status, 200);
@@ -165,6 +165,50 @@ test('multisource extraction stays draft-only until reviewed rows are committed'
     assert.equal(committed.invoices.at(-1).sourceHash, 'b'.repeat(64));
     assert.equal(committed.intakeDraft, null);
     assert.equal(committed.audit.at(-1).action, 'intake-committed');
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});
+
+test('Evidence Agent answers are source-bound, persistent, reviewable, and isolated by user', async () => {
+  const store = createFirestoreStore(fakeFirestore());
+  const createdAt = '2026-10-31T12:00:00.000Z';
+  const fingerprint = 'c'.repeat(64);
+  const ragAgent = {
+    answer: async ({ uid, state, question }) => {
+      assert.equal(uid, 'alice');
+      assert.equal(state.invoices[1].id, 'INV-002');
+      assert.match(question, /INV-002/);
+      return {
+        question, finding: 'INV-002 remains unresolved and BNK-004 is the closest retrieved credit.',
+        evidence: [{ sourceId: 'invoice:INV-002', statement: 'The invoice is NGN 80,000.', type: 'invoice', title: 'INV-002', locator: 'source row 3', sourceHash: 'd'.repeat(64) }],
+        calculation: 'NGN 80,000 - NGN 78,800 = NGN 1,200', confidence: 'medium',
+        missingEvidence: ['POS settlement report'], nextCheck: 'Check the settlement report.',
+        decisionBoundary: 'A human must approve any match.', model: 'muse-spark-1.3', createdAt, sourceFingerprint: fingerprint,
+        retrieval: { mode: 'hybrid-vector', chunksConsidered: 40, selectedCount: 8, embeddingModel: 'gemini-embedding-001', evidence: [{ id: 'invoice:INV-002', type: 'invoice', title: 'INV-002', label: 'Invoice INV-002', locator: 'source row 3', verificationStatus: 'source_record', retrievalReason: 'exact source ID', retrievalScore: 0.1 }] },
+        verification: { status: 'checks_passed', checkedAt: createdAt, checks: [{ id: 'citations', label: 'Citation integrity', passed: true, detail: '1 cited source checked.' }], modelReview: { model: 'muse-spark-1.3', verdict: 'supported', checkedClaims: 2, issues: [] }, humanReview: { status: 'pending' } },
+      };
+    },
+  };
+  const { server, url } = await serve(store, async () => { throw new Error('Not used'); }, undefined, ragAgent);
+  const request = async (user, path, body) => {
+    const response = await fetch(`${url}/api${path}`, {
+      method: body ? 'POST' : 'GET', headers: { Authorization: `Bearer ${user}`, 'Content-Type': 'application/json' },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+    return { status: response.status, data: await response.json() };
+  };
+  try {
+    const initial = await request('alice', '/workspace');
+    const generated = await request('alice', '/agent/query', { question: 'Why is INV-002 unresolved?', version: initial.data.version });
+    assert.equal(generated.status, 200, JSON.stringify(generated.data));
+    assert.equal(generated.data.answer.retrieval.mode, 'hybrid-vector');
+    assert.equal(generated.data.workspace.agentAnswers.length, 1);
+    assert.equal(generated.data.workspace.audit.at(-1).action, 'rag-asked');
+    assert.equal((await request('bob', '/workspace')).data.agentAnswers.length, 0);
+
+    const reviewed = await request('alice', '/agent/reviews', { sourceFingerprint: fingerprint, createdAt, version: generated.data.workspace.version });
+    assert.equal(reviewed.status, 200, JSON.stringify(reviewed.data));
+    assert.equal(reviewed.data.agentAnswers[0].verification.humanReview.status, 'reviewed');
+    assert.equal(reviewed.data.audit.at(-1).action, 'rag-reviewed');
   } finally { await new Promise(resolve => server.close(resolve)); }
 });
 
