@@ -1,0 +1,5 @@
+sku,item,unit,opening_qty,received_qty,sold_qty,adjustment_qty,counted_qty
+RICE-50,Rice 50kg bags,bag,40,20,34,0,26
+OIL-5,Cooking oil 5L,carton,25,10,18,0,16
+SUGAR-10,Sugar 10kg bags,bag,30,5,21,-1,13
+SOAP-CTN,Laundry soap,carton,18,12,20,0,11
