@@ -10,11 +10,12 @@ Recommended five-minute path:
 
 1. Review the seeded invoices, handwritten-style cashbook entries, bank credits, stock count, and visible demo allowances.
 2. In **Meta Smart Intake**, paste `29 October 2026 — cash sales to walk-in customers were ₦42,500, recorded in the daybook.`, select **Extract sales candidates**, confirm **Cash sale**, inspect the provenance, and commit the reviewed row.
-3. Approve an invoice match, then open **Cash Lodgement Desk** and approve one exact daily or weekly cash batch only after reading the teller/deposit-slip checkpoint.
-4. In **Stock Reconciliation**, change a physical count and observe the live shortage/surplus, then save it. Investigate **INV-002** in **Meta Evidence Lab** and inspect its cited, independently verified evidence brief.
-5. Download the PDF and Excel review packs. In **Review Trail**, complete a named review to archive its summary and open a clean source set; **Reset sample** restores the full Judge Demo without refreshing model allowances.
+3. Ask the **NaijaLedger Evidence Agent** why `INV-002` is unresolved. Inspect the records and policy chunks retrieved before Muse Spark's answer, the exact citations, and the independent verification receipt.
+4. Approve an invoice match, then open **Cash Lodgement Desk** and approve one exact daily or weekly cash batch only after reading the teller/deposit-slip checkpoint.
+5. In **Stock Reconciliation**, change a physical count and observe the live shortage/surplus, then save it. Investigate **INV-002** in **Meta Evidence Lab** and inspect its cited brief.
+6. Download the PDF and Excel review packs. In **Review Trail**, complete a named review to archive its summary and open a clean source set; **Reset sample** restores the full Judge Demo without refreshing model allowances.
 
-Each anonymous workspace allows three Smart Intake extractions and five investigations. A separate bounded public traffic limit protects the hosted Meta integration. The banner always labels synthetic data and remaining calls; normal Google workspaces remain private and unchanged. The repository still runs independently using the setup below.
+Each anonymous workspace allows three Smart Intake extractions, five invoice investigations, and three Evidence Agent questions. A separate bounded public traffic limit protects the hosted Meta integration. The banner always labels synthetic data and remaining calls; normal Google workspaces remain private and unchanged. The repository still runs independently using the setup below.
 
 ## What works
 
@@ -26,6 +27,8 @@ Each anonymous workspace allows three Smart Intake extractions and five investig
 - Cash Lodgement Desk groups unallocated cashbook entries by business day and week, and proposes an exact later bank credit only when the grouping is unambiguous. The cashier's teller, lodgement reference or deposit slip remains a mandatory human checkpoint. One bank credit can never be allocated to both an invoice and a cash batch.
 - Stock Reconciliation keeps a deliberately simple SKU-level movement record: opening + received - sold + adjustment = expected. A physical count produces a signed shortage/surplus and can be edited directly or replaced from CSV.
 - Completing a review saves a bounded historical summary with dates, source fingerprints, counts, totals, approved invoice/cash matches and stock exceptions, then clears the active records for the next statement period. Up to twelve completed summaries remain in the workspace.
+- The NaijaLedger Evidence Agent creates source-addressable chunks from reviewed invoices, bank rows, cashbook entries, stock records, completed review summaries and the curated bookkeeping knowledge base. It combines accounting-aware retrieval with Firestore vector search, displays the retrieved sources before generation, and sends only the selected evidence to Muse Spark 1.3. If the vector index is still building, a visible structured-retrieval fallback keeps the demo working.
+- Every Evidence Agent response includes exact citations, visible arithmetic, missing evidence, a next human check, deterministic retrieval/citation/policy checks, an independent Muse groundedness pass, a SHA-256 evidence fingerprint and a persistent human-read checkpoint.
 - “Investigate with Meta” sends one selected invoice and up to 12 bank credits to Muse Spark 1.3. The model returns a constrained evidence brief. A second independent Muse pass reviews groundedness, while deterministic checks verify the schema, source fingerprint, citations, amounts, and decision boundary. The persisted verification receipt records attempts and requires explicit human sign-off. Neither model can approve a match or determine tax treatment.
 - The authenticated review pack downloads as a polished PDF summary and a complete Excel workbook. Both retain invoice and cash decisions, cashbook rows, stock variances, review history, source hashes, unresolved rows, verification receipts, AI briefs, and audit activity for accountant review.
 
@@ -38,7 +41,7 @@ Requires **Node 22+**, a Firebase project, and a Google account. Install with `n
 3. Give the local backend Application Default Credentials: set `GOOGLE_APPLICATION_CREDENTIALS` to the absolute path of a service-account JSON file kept **outside** this repository. In Google Cloud hosting, use workload identity instead. Never paste or commit that JSON. The `firebase-admin` SDK needs access to Authentication and Firestore.
 4. Deploy `firestore.rules` to the Firebase project before loading any real records. The browser is denied direct Firestore access; only the server Admin SDK reads and writes data. Keep the server behind HTTPS in production.
 5. In separate terminals run `npm run dev` and `npm start`, then open `http://localhost:5173`. Node loads `.env.local` for the server; Vite loads its `VITE_` values for the browser.
-6. Optional: set `MODEL_API_KEY` in `.env.local` for the Meta evidence lab. The key stays on the backend. Without it, imports and approvals still work; investigation returns a clear configuration error.
+6. Optional: set `MODEL_API_KEY` in `.env.local` for Meta features. The key stays on the backend. Application Default Credentials may call Vertex AI for 768-dimensional retrieval embeddings; without that access, the Evidence Agent safely falls back to structured lexical retrieval while Muse Spark remains the answer and verification model.
 
 Run `npm test` and `npm run build` before submitting. The test suite uses a fake Firestore and Meta response; it does **not** prove that your Firebase or Meta credentials are live. Check those flows manually with your project after setup.
 
@@ -58,9 +61,9 @@ Judge Demo uses the same verified backend and per-UID Firestore isolation as a n
 
 ## Architecture
 
-`React/Vite → Firebase Authentication → Express (verified ID token) → Meta Smart Intake / deterministic reconciliation → Firestore per UID`
+`React/Vite → Firebase Authentication → Express (verified ID token) → reviewed evidence chunks → Firestore vector search + accounting filters → Muse Spark answer and verifier → human checkpoint`
 
-The Express server alone calls Meta Model API. Firestore rules deny all browser reads and writes. The workspace document contains normalized source rows, an optional extraction draft, approvals, briefs, source hashes, version, and a bounded audit log. A transaction reads the current version before each write. Smart Intake uses Muse Spark 1.3 for images, PDFs and structured text, `mammoth` for local DOCX text extraction, and Muse Voice Transcribe for speech. The evidence lab still receives only a small, explicit evidence selection when the user clicks investigate.
+The Express server alone calls Meta Model API and the embedding service. Firestore rules deny all browser reads and writes. Per-user RAG subcollections prevent cross-workspace retrieval. The workspace document contains normalized source rows, an optional extraction draft, approvals, briefs, Evidence Agent answers, source hashes, version, and a bounded audit log. Smart Intake uses Muse Spark 1.3 for images, PDFs and structured text, `mammoth` for local DOCX text extraction, and Muse Voice Transcribe for speech. The model receives only the small evidence set selected by the retriever.
 
 ## Remaining work before production or judging
 

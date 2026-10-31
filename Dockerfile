@@ -17,6 +17,7 @@ RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/dist ./dist
 COPY server ./server
 COPY samples ./samples
+COPY knowledge ./knowledge
 USER node
 EXPOSE 8080
 CMD ["node", "server/index.mjs"]
