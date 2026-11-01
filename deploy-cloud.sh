@@ -26,7 +26,14 @@ gcloud projects add-iam-policy-binding "$PROJECT" --member="serviceAccount:${IDE
 # The Evidence Agent works immediately with structured lexical retrieval. This
 # vector index upgrades it to semantic hybrid retrieval as soon as Firestore
 # finishes building the index.
-if ! gcloud firestore indexes composite list --project "$PROJECT" --database='(default)' --filter='collectionGroup:ragChunks' --format='value(fields.fieldPath)' | grep -q embedding; then
+if gcloud firestore indexes composite list --project "$PROJECT" --database='(default)' --format=json |
+  jq -e '.[]
+    | select((.name // "") | contains("/collectionGroups/ragChunks/indexes/"))
+    | select(any(.fields[]?;
+        .fieldPath == "embedding" and
+        ((.vectorConfig.dimension // "") | tostring) == "768"))' >/dev/null; then
+  printf 'Firestore vector index for ragChunks already exists; continuing.\n'
+else
   gcloud firestore indexes composite create \
     --project="$PROJECT" --database='(default)' --collection-group=ragChunks --query-scope=COLLECTION \
     --field-config=field-path=embedding,vector-config='{"dimension":"768","flat": "{}"}' \
