@@ -10,6 +10,12 @@ function reviewedState() {
   state.updatedAt = '2026-10-29T14:17:00.000Z';
   state.approved = [{ invoiceId: 'INV-001', bankId: 'BNK-001', reviewedAt: '2026-10-29T14:00:00.000Z', reviewedBy: 'test-user' }];
   state.cashAllocations = [{ cashEntryIds: ['CASH-001', 'CASH-002'], bankId: 'BNK-008', reviewedAt: '2026-10-29T14:02:00.000Z', reviewedBy: 'test-user', frequency: 'daily' }];
+  state.manualResolutions = [{
+    id: 'resolution-invoice-INV-002-20261029141700', kind: 'invoice', recordId: 'INV-002', amountKobo: 8000000,
+    comment: 'POS fee statement explains the net settlement; retained for follow-up.', reviewedAt: '2026-10-29T14:17:00.000Z',
+    reviewer: { uid: 'test-user', displayName: 'Test Reviewer', email: 'reviewer@example.com', isAnonymous: false },
+    metaInvestigated: true, sourceHash: 'b'.repeat(64),
+  }];
   state.briefs = {
     'INV-002': {
       summary: 'BNK-004 may be a net settlement, with a difference requiring human evidence.',
@@ -39,7 +45,8 @@ function reviewedState() {
   }];
   state.audit = [
     { action: 'approved', invoiceId: 'INV-001', bankId: 'BNK-001', by: 'test-user', at: '2026-10-29T14:00:00.000Z' },
-    { action: 'brief-reviewed', invoiceId: 'INV-002', by: 'test-user', at: '2026-10-29T14:15:00.000Z', sourceFingerprint: 'a'.repeat(64) },
+    { action: 'brief-reviewed', invoiceId: 'INV-002', by: 'test-user', actor: { uid: 'test-user', displayName: 'Test Reviewer', email: 'reviewer@example.com' }, at: '2026-10-29T14:15:00.000Z', sourceFingerprint: 'a'.repeat(64) },
+    { action: 'exception-resolved', kind: 'invoice', recordId: 'INV-002', invoiceId: 'INV-002', comment: 'POS fee statement explains the net settlement; retained for follow-up.', by: 'test-user', actor: { uid: 'test-user', displayName: 'Test Reviewer', email: 'reviewer@example.com' }, at: '2026-10-29T14:17:00.000Z' },
   ];
   return state;
 }
@@ -61,16 +68,18 @@ test('review pack Excel workbook preserves source, review, verification, and aud
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(file);
   assert.deepEqual(workbook.worksheets.map(sheet => sheet.name), [
-    'Summary', 'Approved Matches', 'Unresolved Invoices', 'Unresolved Bank', 'Sales Invoices',
+    'Summary', 'Approved Matches', 'Unresolved Invoices', 'Unresolved Bank', 'Manual Resolutions', 'Sales Invoices',
     'Bank Transactions', 'Cashbook', 'Cash Deposits', 'Stock Reconciliation', 'Review History',
     'AI Briefs', 'Evidence Agent', 'Verification Checks', 'Audit Trail',
   ]);
   assert.equal(workbook.getWorksheet('Summary').getCell('A1').value, 'NaijaLedger review pack');
   assert.equal(workbook.getWorksheet('Approved Matches').getCell('A2').value, 'INV-001');
+  assert.equal(workbook.getWorksheet('Manual Resolutions').getCell('D2').value, 'INV-002');
+  assert.equal(workbook.getWorksheet('Manual Resolutions').getCell('H2').value, 'Test Reviewer');
   assert.equal(workbook.getWorksheet('Cash Deposits').getCell('A2').value, 'Approved');
   assert.equal(workbook.getWorksheet('Stock Reconciliation').getCell('A2').value, 'RICE-50');
   assert.equal(workbook.getWorksheet('AI Briefs').getCell('A2').value, 'INV-002');
   assert.match(String(workbook.getWorksheet('Evidence Agent').getCell('B2').value), /INV-002/);
   assert.equal(workbook.getWorksheet('Verification Checks').getCell('D2').value, 'Passed');
-  assert.equal(workbook.getWorksheet('Audit Trail').rowCount, 3);
+  assert.equal(workbook.getWorksheet('Audit Trail').rowCount, 4);
 });

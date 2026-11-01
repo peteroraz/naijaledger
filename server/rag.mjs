@@ -128,10 +128,25 @@ export function buildRagChunks(state) {
     text: clean(`Human-approved ${allocation.frequency || ''} cash lodgement from cash entries ${(allocation.cashEntryIds || []).join(', ')} to bank row ${allocation.bankId}. Reviewed at ${allocation.reviewedAt || 'not supplied'}.`),
     sourceHash: sha256(JSON.stringify(allocation)), verificationStatus: 'human_approved',
   });
+  for (const resolution of (state.manualResolutions || []).slice(-60)) chunks.push({
+    id: `resolution:${resolution.kind}:${resolution.recordId}`, ref: resolution.recordId, type: 'manual_resolution',
+    title: `Human-resolved ${resolution.kind} ${resolution.recordId}`, label: 'Commented human resolution',
+    locator: resolution.reviewedAt || 'review log', cycle, amountKobo: resolution.amountKobo || null,
+    text: clean(`Human reviewer ${resolution.reviewer?.displayName || resolution.reviewer?.email || resolution.reviewer?.uid || 'reviewer'} resolved ${resolution.kind} ${resolution.recordId} at ${resolution.reviewedAt || 'not supplied'}. Comment: ${resolution.comment}. Meta investigation present: ${resolution.metaInvestigated ? 'yes' : 'no'}.`),
+    sourceHash: resolution.sourceHash || sha256(JSON.stringify(resolution)), verificationStatus: 'human_resolved_with_comment',
+  });
+  const archivedResolutions = (state.reviewHistory || []).flatMap(review => (review.manualResolutions || []).map(resolution => ({ review, resolution }))).slice(-40);
+  for (const { review, resolution } of archivedResolutions) chunks.push({
+    id: `archived-resolution:${review.id}:${resolution.kind}:${resolution.recordId}`, ref: resolution.recordId, type: 'manual_resolution_history',
+    title: `${review.title} · ${resolution.recordId}`, label: 'Archived commented resolution',
+    locator: resolution.reviewedAt || review.completedAt, cycle: review.title, amountKobo: resolution.amountKobo || null,
+    text: clean(`Archived review ${review.title}. Human reviewer ${resolution.reviewer?.displayName || resolution.reviewer?.email || resolution.reviewer?.uid || 'reviewer'} resolved ${resolution.kind} ${resolution.recordId} at ${resolution.reviewedAt || 'not supplied'}. Comment: ${resolution.comment}.`),
+    sourceHash: resolution.sourceHash || sha256(JSON.stringify(resolution)), verificationStatus: 'archived_human_resolution',
+  });
   for (const review of (state.reviewHistory || []).slice(-12)) chunks.push({
     id: `review:${review.id}`, ref: review.id, type: 'review_history', title: review.title,
     label: `Completed review · ${review.title}`, locator: review.completedAt, cycle: review.title, amountKobo: null,
-    text: clean(`Completed review ${review.title}, from ${review.startedAt} to ${review.completedAt}. ${review.counts?.invoices || 0} invoices, ${review.counts?.bank || 0} bank rows, ${review.counts?.cashbook || 0} cashbook entries, ${review.counts?.stock || 0} stock items. ${review.results?.approvedInvoiceMatches || 0} invoice matches, ${review.results?.approvedCashDeposits || 0} cash deposits, ${review.results?.stockVarianceItems || 0} stock variances.`),
+    text: clean(`Completed review ${review.title}, from ${review.startedAt} to ${review.completedAt}. ${review.counts?.invoices || 0} invoices, ${review.counts?.bank || 0} bank rows, ${review.counts?.cashbook || 0} cashbook entries, ${review.counts?.stock || 0} stock items. ${review.results?.approvedInvoiceMatches || 0} invoice matches, ${review.results?.approvedCashDeposits || 0} cash deposits, ${review.results?.manualResolutions || 0} commented manual resolutions, ${review.results?.stockVarianceItems || 0} stock variances.`),
     sourceHash: sha256(JSON.stringify(review)), verificationStatus: 'archived_summary',
   });
   return [...chunks, ...policyChunks()].slice(0, MAX_CHUNKS);

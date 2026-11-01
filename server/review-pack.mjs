@@ -26,25 +26,46 @@ const text = value => String(value ?? '')
 
 export function createReviewPack(state, generatedAt = new Date().toISOString()) {
   const cashAllocations = state.cashAllocations || [];
-  const invoiceReview = reconcile(state.invoices, state.bank, state.approved || [], cashAllocations.map(row => row.bankId));
-  const cashReview = reconcileCashbook(state.cashbook || [], state.bank, cashAllocations, [...invoiceReview.matches, ...invoiceReview.proposals].map(row => row.bankId));
+  const manualResolutions = state.manualResolutions || [];
+  const resolvedInvoiceIds = manualResolutions.filter(row => row.kind === 'invoice').map(row => row.recordId);
+  const resolvedBankIds = manualResolutions.filter(row => row.kind === 'bank').map(row => row.recordId);
+  const invoiceReview = reconcile(state.invoices, state.bank, state.approved || [], [...cashAllocations.map(row => row.bankId), ...resolvedBankIds], resolvedInvoiceIds);
+  const cashReview = reconcileCashbook(state.cashbook || [], state.bank, cashAllocations, [...invoiceReview.matches, ...invoiceReview.proposals].map(row => row.bankId).concat(resolvedBankIds));
   const cashBankIds = new Set([...cashReview.matches, ...cashReview.proposals].map(row => row.bankId));
+  const manualReviewedInvoiceKobo = manualResolutions.filter(row => row.kind === 'invoice').reduce((total, row) => total + Number(row.amountKobo || 0), 0);
+  const manualReviewedBankKobo = manualResolutions.filter(row => row.kind === 'bank').reduce((total, row) => total + Number(row.amountKobo || 0), 0);
+  const reviewHistory = state.reviewHistory || [];
+  const allManualResolutions = [
+    ...reviewHistory.flatMap(review => (review.manualResolutions || []).map(row => ({ ...row, reviewId: review.id, reviewTitle: review.title }))),
+    ...manualResolutions.map(row => ({ ...row, reviewId: state.reviewCycle?.title || 'active', reviewTitle: state.reviewCycle?.title || 'Current review' })),
+  ];
+  const allAudit = [
+    ...reviewHistory.flatMap(review => (review.audit || []).map(event => ({ ...event, reviewId: review.id, reviewTitle: review.title }))),
+    ...(state.audit || []).map(event => ({ ...event, reviewId: state.reviewCycle?.title || 'active', reviewTitle: state.reviewCycle?.title || 'Current review' })),
+  ];
+  const totals = {
+    ...invoiceReview.totals,
+    manualReviewedInvoiceKobo,
+    manualReviewedBankKobo,
+    manualReviewedKobo: manualReviewedInvoiceKobo + manualReviewedBankKobo,
+    reviewedLedgerKobo: invoiceReview.totals.approvedKobo + cashReview.totals.bankedCashKobo + manualReviewedInvoiceKobo + manualReviewedBankKobo,
+  };
   return {
     title: 'NaijaLedger review pack',
     generatedAt,
     status: 'Human review required; not a tax filing or accounting certification',
     sourceHashes: state.imports,
     workspaceVersion: state.version,
-    ...invoiceReview,
+    ...invoiceReview, totals,
     unresolvedBank: invoiceReview.unresolvedBank.filter(row => !cashBankIds.has(row.id)),
     invoices: state.invoices,
     bank: state.bank,
     approved: state.approved || [],
-    cashbook: state.cashbook || [], cashAllocations, cashReview,
+    cashbook: state.cashbook || [], cashAllocations, cashReview, manualResolutions: allManualResolutions,
     stockReview: reconcileStock(state.stock || []),
-    reviewCycle: state.reviewCycle || null, reviewHistory: state.reviewHistory || [],
+    reviewCycle: state.reviewCycle || null, reviewHistory,
     briefs: state.briefs || {}, agentAnswers: state.agentAnswers || [],
-    audit: state.audit || [],
+    audit: allAudit,
     updatedAt: state.updatedAt,
   };
 }
@@ -117,6 +138,7 @@ export async function buildReviewWorkbook(report) {
     ['Unresolved invoices', report.unresolvedInvoices.length, 'Unresolved bank entries', report.unresolvedBank.length],
     ['Invoiced total', amount(report.totals.invoicedKobo), 'Bank credit total', amount(report.totals.bankCreditsKobo)],
     ['Approved invoice total', amount(report.totals.approvedKobo), 'AI evidence briefs', Object.keys(report.briefs).length],
+    ['Comment-resolved invoices', amount(report.totals.manualReviewedInvoiceKobo), 'Comment-resolved bank entries', amount(report.totals.manualReviewedBankKobo)],
     ['Cashbook total', amount(report.cashReview.totals.cashSalesKobo), 'Approved cash lodgements', report.cashReview.matches.length],
     ['Stock items', report.stockReview.summary.totalItems, 'Stock variances', report.stockReview.summary.varianceItems],
     ['Evidence Agent answers', report.agentAnswers.length, 'Completed review history', report.reviewHistory.length],
@@ -128,12 +150,12 @@ export async function buildReviewWorkbook(report) {
     cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: `FF${GREEN}` } };
     cell.font = { name: 'Arial', size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
   });
-  for (let row = 5; row <= 13; row += 1) {
+  for (let row = 5; row <= 14; row += 1) {
     summary.getRow(row).font = { name: 'Arial', size: 10, color: { argb: `FF${TEXT}` } };
     summary.getCell(`A${row}`).font = { name: 'Arial', size: 10, bold: true, color: { argb: `FF${MUTED}` } };
     summary.getCell(`C${row}`).font = { name: 'Arial', size: 10, bold: true, color: { argb: `FF${MUTED}` } };
   }
-  ['B9', 'D9', 'B10', 'B11'].forEach(ref => { summary.getCell(ref).numFmt = MONEY_FORMAT; });
+  ['B9', 'D9', 'B10', 'B11', 'D11', 'B12'].forEach(ref => { summary.getCell(ref).numFmt = MONEY_FORMAT; });
   ['B5', 'B6'].forEach(ref => { summary.getCell(ref).numFmt = 'yyyy-mm-dd hh:mm'; });
   summary.addRow([]);
   const hashHeading = summary.addRow(['Source fingerprints']);
@@ -187,6 +209,18 @@ export async function buildReviewWorkbook(report) {
   const bankRows = rows => rows.map(row => ({ id: row.id, date: dateValue(row.date), description: row.description, amount: amount(row.amountKobo), sourceRow: row.sourceRow }));
   addRowsSheet(workbook, 'Unresolved Invoices', invoiceColumns, invoiceRows(report.unresolvedInvoices), { A: 15, B: 15, C: 32, D: 18, E: 13, F: 30, G: 15, H: 20, I: 20, J: 68, K: 24 });
   addRowsSheet(workbook, 'Unresolved Bank', sourceColumns('Description', 'description'), bankRows(report.unresolvedBank), { A: 15, B: 15, C: 48, D: 18, E: 13 });
+  const resolutions = addRowsSheet(workbook, 'Manual Resolutions', [
+    { header: 'Review period', key: 'reviewTitle' }, { header: 'Resolution ID', key: 'id' }, { header: 'Record type', key: 'kind' }, { header: 'Record ID', key: 'recordId' },
+    { header: 'Amount (NGN)', key: 'amount', style: { numFmt: MONEY_FORMAT } }, { header: 'Review comment', key: 'comment' },
+    { header: 'Reviewed at', key: 'reviewedAt', style: { numFmt: 'yyyy-mm-dd hh:mm' } }, { header: 'Reviewer name', key: 'reviewerName' },
+    { header: 'Reviewer email', key: 'reviewerEmail' }, { header: 'Reviewer UID', key: 'reviewerUid' },
+    { header: 'Meta brief used', key: 'metaInvestigated' }, { header: 'Source SHA-256', key: 'sourceHash' },
+  ], report.manualResolutions.map(row => ({
+    ...row, amount: amount(row.amountKobo), reviewedAt: dateValue(row.reviewedAt),
+    reviewerName: row.reviewer?.displayName || '', reviewerEmail: row.reviewer?.email || '', reviewerUid: row.reviewer?.uid || '',
+    metaInvestigated: row.metaInvestigated ? 'Yes' : 'No',
+  })), { A: 28, B: 36, C: 14, D: 16, E: 18, F: 68, G: 21, H: 26, I: 32, J: 30, K: 16, L: 68 });
+  resolutions.getColumn('F').alignment = { vertical: 'top', wrapText: true };
   addRowsSheet(workbook, 'Sales Invoices', invoiceColumns, invoiceRows(report.invoices), { A: 15, B: 15, C: 32, D: 18, E: 13, F: 30, G: 15, H: 20, I: 20, J: 68, K: 24 });
   addRowsSheet(workbook, 'Bank Transactions', sourceColumns('Description', 'description'), bankRows(report.bank), { A: 15, B: 15, C: 48, D: 18, E: 13 });
   addRowsSheet(workbook, 'Cashbook', [
@@ -211,8 +245,9 @@ export async function buildReviewWorkbook(report) {
   addRowsSheet(workbook, 'Review History', [
     { header: 'Review ID', key: 'id' }, { header: 'Title', key: 'title' }, { header: 'Started', key: 'startedAt' }, { header: 'Completed', key: 'completedAt' },
     { header: 'Invoices', key: 'invoices' }, { header: 'Cash entries', key: 'cashbook' }, { header: 'Bank rows', key: 'bank' }, { header: 'Stock items', key: 'stock' },
-    { header: 'Reviewed settlement (NGN)', key: 'settlement', style: { numFmt: MONEY_FORMAT } }, { header: 'Stock variances', key: 'stockVariances' },
-  ], report.reviewHistory.map(row => ({ ...row, startedAt: dateValue(row.startedAt), completedAt: dateValue(row.completedAt), ...row.counts, settlement: amount(row.totals.approvedInvoiceKobo + row.totals.bankedCashKobo), stockVariances: row.results.stockVarianceItems })), { A: 22, B: 28, C: 21, D: 21, E: 11, F: 13, G: 11, H: 12, I: 24, J: 16 });
+    { header: 'Reviewed ledger value (NGN)', key: 'settlement', style: { numFmt: MONEY_FORMAT } }, { header: 'Manual resolutions', key: 'manualResolutions' },
+    { header: 'Stock variances', key: 'stockVariances' }, { header: 'Completed by', key: 'completedBy' },
+  ], report.reviewHistory.map(row => ({ ...row, startedAt: dateValue(row.startedAt), completedAt: dateValue(row.completedAt), ...row.counts, settlement: amount(row.totals.reviewedLedgerKobo ?? (row.totals.approvedInvoiceKobo + row.totals.bankedCashKobo)), manualResolutions: row.results.manualResolutions || 0, stockVariances: row.results.stockVarianceItems, completedBy: row.completedBy?.displayName || row.completedBy?.email || row.completedBy?.uid || '' })), { A: 22, B: 28, C: 21, D: 21, E: 11, F: 13, G: 11, H: 12, I: 24, J: 18, K: 16, L: 28 });
 
   const briefRows = Object.entries(report.briefs).map(([invoiceId, brief]) => ({
     invoiceId, createdAt: dateValue(brief.createdAt), model: brief.model, briefStatus: brief.status,
@@ -293,10 +328,11 @@ export async function buildReviewWorkbook(report) {
   checks.eachRow((row, rowNumber) => { if (rowNumber > 1) row.height = 28; });
 
   addRowsSheet(workbook, 'Audit Trail', [
-    { header: 'Timestamp', key: 'at', style: { numFmt: 'yyyy-mm-dd hh:mm' } }, { header: 'Action', key: 'action' },
+    { header: 'Review period', key: 'reviewTitle' }, { header: 'Timestamp', key: 'at', style: { numFmt: 'yyyy-mm-dd hh:mm' } }, { header: 'Action', key: 'action' },
     { header: 'Invoice ID', key: 'invoiceId' }, { header: 'Bank ID', key: 'bankId' }, { header: 'Import type', key: 'kind' },
-    { header: 'Rows', key: 'rows' }, { header: 'Actor', key: 'by' }, { header: 'Source fingerprint', key: 'sourceFingerprint' },
-  ], report.audit.map(event => ({ ...event, at: dateValue(event.at) })), { A: 21, B: 24, C: 14, D: 14, E: 15, F: 10, G: 28, H: 68 });
+    { header: 'Rows', key: 'rows' }, { header: 'Reviewer name', key: 'reviewerName' }, { header: 'Reviewer email', key: 'reviewerEmail' },
+    { header: 'Reviewer UID', key: 'by' }, { header: 'Review comment', key: 'comment' }, { header: 'Source fingerprint', key: 'sourceFingerprint' },
+  ], report.audit.map(event => ({ ...event, at: dateValue(event.at), reviewerName: event.actor?.displayName || '', reviewerEmail: event.actor?.email || '' })), { A: 28, B: 21, C: 24, D: 14, E: 14, F: 15, G: 10, H: 26, I: 32, J: 30, K: 68, L: 68 });
 
   return Buffer.from(await workbook.xlsx.writeBuffer());
 }
@@ -380,6 +416,7 @@ export async function buildReviewPdf(report) {
       ['Unresolved invoices', report.unresolvedInvoices.length, 'Unresolved bank entries', report.unresolvedBank.length],
       ['Invoiced total', ngn(report.totals.invoicedKobo), 'Bank credit total', ngn(report.totals.bankCreditsKobo)],
       ['Approved total', ngn(report.totals.approvedKobo), 'AI evidence briefs', Object.keys(report.briefs).length],
+      ['Comment-resolved invoices', ngn(report.totals.manualReviewedInvoiceKobo), 'Comment-resolved bank', ngn(report.totals.manualReviewedBankKobo)],
       ['Cashbook total', ngn(report.cashReview.totals.cashSalesKobo), 'Approved cash deposits', report.cashReview.matches.length],
       ['Stock items', report.stockReview.summary.totalItems, 'Stock variances', report.stockReview.summary.varianceItems],
       ['Evidence Agent answers', report.agentAnswers.length, 'Completed reviews', report.reviewHistory.length],
@@ -398,6 +435,13 @@ export async function buildReviewPdf(report) {
       match.invoiceId, invoiceById.get(match.invoiceId)?.customer || '', match.bankId, bankById.get(match.bankId)?.description || '', ngn(match.amountKobo),
     ]), [60, 100, 64, 190, 62], ['left', 'left', 'left', 'left', 'right']);
     else paragraph('No approved matches.', { color: `#${MUTED}` });
+
+    section('Commented human resolutions');
+    if (report.manualResolutions.length) pdfTable(doc, ['Review', 'Type', 'Record', 'Amount', 'Reviewed at', 'Reviewer', 'Review comment'], report.manualResolutions.map(row => [
+      row.reviewTitle || 'Current review', row.kind, row.recordId, ngn(row.amountKobo), iso(row.reviewedAt).replace('T', ' ').replace('.000Z', ' UTC'),
+      row.reviewer?.displayName || row.reviewer?.email || row.reviewer?.uid || 'Reviewer', row.comment,
+    ]), [70, 42, 54, 62, 82, 74, 92], ['left', 'left', 'left', 'right', 'left', 'left', 'left']);
+    else paragraph('No manually resolved exceptions.', { color: `#${MUTED}` });
 
     section('Unresolved invoices');
     if (report.unresolvedInvoices.length) pdfTable(doc, ['Invoice', 'Date', 'Customer', 'Source row', 'Amount'], report.unresolvedInvoices.map(row => [row.id, row.date, row.customer, row.sourceRow, ngn(row.amountKobo)]), [64, 72, 188, 70, 82], ['left', 'left', 'left', 'right', 'right']);
@@ -423,9 +467,9 @@ export async function buildReviewPdf(report) {
     else paragraph('No stock records loaded.', { color: `#${MUTED}` });
 
     section('Completed review history');
-    if (report.reviewHistory.length) pdfTable(doc, ['Completed', 'Review', 'Sources', 'Reviewed settlement', 'Stock exceptions'], report.reviewHistory.map(row => [
-      iso(row.completedAt).slice(0, 10), row.title, `${row.counts.invoices} inv / ${row.counts.cashbook} cash / ${row.counts.bank} bank`, ngn(row.totals.approvedInvoiceKobo + row.totals.bankedCashKobo), row.results.stockVarianceItems,
-    ]), [72, 128, 116, 104, 56], ['left', 'left', 'left', 'right', 'right']);
+    if (report.reviewHistory.length) pdfTable(doc, ['Completed', 'Review', 'Sources', 'Reviewed ledger', 'Manual', 'Stock'], report.reviewHistory.map(row => [
+      iso(row.completedAt).slice(0, 10), row.title, `${row.counts.invoices} inv / ${row.counts.cashbook} cash / ${row.counts.bank} bank`, ngn(row.totals.reviewedLedgerKobo ?? (row.totals.approvedInvoiceKobo + row.totals.bankedCashKobo)), row.results.manualResolutions || 0, row.results.stockVarianceItems,
+    ]), [68, 118, 108, 92, 45, 45], ['left', 'left', 'left', 'right', 'right', 'right']);
     else paragraph('No completed review cycles yet.', { color: `#${MUTED}` });
 
     section('NaijaLedger Evidence Agent - retrieved sources and answers');
@@ -484,9 +528,10 @@ export async function buildReviewPdf(report) {
     }
 
     section('Audit trail');
-    if (report.audit.length) pdfTable(doc, ['Timestamp', 'Action', 'Invoice', 'Bank record', 'Actor / detail'], report.audit.map(event => [
-      iso(event.at).replace('T', ' ').replace('.000Z', ' UTC'), event.action, event.invoiceId || '', event.bankId || '', event.by || (event.kind ? `${event.rows || 0} ${event.kind} rows` : ''),
-    ]), [114, 104, 68, 74, 116]);
+    if (report.audit.length) pdfTable(doc, ['Timestamp', 'Action', 'Record', 'Reviewer', 'Comment / detail'], report.audit.map(event => [
+      iso(event.at).replace('T', ' ').replace('.000Z', ' UTC'), event.action, event.invoiceId || event.bankId || event.recordId || '',
+      event.actor?.displayName || event.actor?.email || event.by || 'System', event.comment || (event.kind ? `${event.rows || 0} ${event.kind} rows` : ''),
+    ]), [108, 94, 66, 94, 114]);
     else paragraph('No audit activity.', { color: `#${MUTED}` });
 
     const pages = doc.bufferedPageRange();

@@ -12,7 +12,7 @@ export function seedWorkspace() {
     bank: parseCsv(samples.bank, 'bank'),
     cashbook: parseCsv(samples.cashbook, 'cashbook'),
     stock: parseCsv(samples.stock, 'stock'),
-    approved: [], cashAllocations: [], briefs: {}, agentAnswers: [], intakeDraft: null, audit: [], reviewHistory: [], version: 0,
+    approved: [], cashAllocations: [], manualResolutions: [], briefs: {}, agentAnswers: [], intakeDraft: null, audit: [], reviewHistory: [], version: 0,
     reviewCycle: { title: 'October 2026 operating review', startedAt: '2026-10-01T00:00:00.000Z' },
     imports: { invoices: sha256(samples.invoices), bank: sha256(samples.bank), cashbook: sha256(samples.cashbook), stock: sha256(samples.stock) },
     updatedAt: new Date().toISOString(),
@@ -73,7 +73,7 @@ export function createFirestoreStore(db) {
         return usage;
       });
     },
-    async saveBrief(uid, expectedVersion, invoiceId, brief) {
+    async saveBrief(uid, expectedVersion, invoiceId, brief, actor = { uid }) {
       return db.runTransaction(async tx => {
         const doc = ref(uid);
         const snap = await tx.get(doc);
@@ -89,12 +89,12 @@ export function createFirestoreStore(db) {
         state.briefs = { ...state.briefs, [invoiceId]: brief };
         const oldest = Object.entries(state.briefs).sort((a, b) => a[1].createdAt.localeCompare(b[1].createdAt));
         for (const [id] of oldest.slice(0, Math.max(0, oldest.length - 20))) delete state.briefs[id];
-        state.audit = [...(state.audit || []), { action: 'investigated', invoiceId, at: brief.createdAt, sourceFingerprint: brief.sourceFingerprint }].slice(-100);
+        state.audit = [...(state.audit || []), { action: 'investigated', invoiceId, at: brief.createdAt, sourceFingerprint: brief.sourceFingerprint, by: uid, actor }].slice(-100);
         tx.set(doc, state);
         return state;
       });
     },
-    async saveAgentAnswer(uid, expectedVersion, answer) {
+    async saveAgentAnswer(uid, expectedVersion, answer, actor = { uid }) {
       return db.runTransaction(async tx => {
         const doc = ref(uid);
         const snap = await tx.get(doc);
@@ -107,13 +107,13 @@ export function createFirestoreStore(db) {
         state.agentAnswers = [...(state.agentAnswers || []), answer].slice(-8);
         state.audit = [...(state.audit || []), {
           action: 'rag-asked', at: answer.createdAt, question: answer.question.slice(0, 160),
-          sourceFingerprint: answer.sourceFingerprint, retrievalMode: answer.retrieval?.mode,
+          sourceFingerprint: answer.sourceFingerprint, retrievalMode: answer.retrieval?.mode, by: uid, actor,
         }].slice(-100);
         tx.set(doc, state);
         return state;
       });
     },
-    async reviewAgentAnswer(uid, expectedVersion, sourceFingerprint, createdAt) {
+    async reviewAgentAnswer(uid, expectedVersion, sourceFingerprint, createdAt, actor = { uid }) {
       return db.runTransaction(async tx => {
         const doc = ref(uid);
         const snap = await tx.get(doc);
@@ -131,17 +131,17 @@ export function createFirestoreStore(db) {
         }
         const reviewedAt = new Date().toISOString();
         answer.verification = answer.verification || {};
-        answer.verification.humanReview = { status: 'reviewed', reviewedAt, reviewedBy: uid };
+        answer.verification.humanReview = { status: 'reviewed', reviewedAt, reviewedBy: uid, reviewer: actor };
         state.version += 1;
         state.updatedAt = reviewedAt;
         state.audit = [...(state.audit || []), {
-          action: 'rag-reviewed', at: reviewedAt, by: uid, sourceFingerprint,
+          action: 'rag-reviewed', at: reviewedAt, by: uid, actor, sourceFingerprint,
         }].slice(-100);
         tx.set(doc, state);
         return state;
       });
     },
-    async reviewBrief(uid, expectedVersion, invoiceId, sourceFingerprint) {
+    async reviewBrief(uid, expectedVersion, invoiceId, sourceFingerprint, actor = { uid }) {
       return db.runTransaction(async tx => {
         const doc = ref(uid);
         const snap = await tx.get(doc);
@@ -159,12 +159,12 @@ export function createFirestoreStore(db) {
         }
         const reviewedAt = new Date().toISOString();
         brief.verification = brief.verification || {};
-        brief.verification.humanReview = { status: 'reviewed', reviewedAt, reviewedBy: uid };
+        brief.verification.humanReview = { status: 'reviewed', reviewedAt, reviewedBy: uid, reviewer: actor };
         state.version += 1;
         state.updatedAt = reviewedAt;
         state.audit = [...(state.audit || []), {
           action: 'brief-reviewed', invoiceId, at: reviewedAt,
-          by: uid, sourceFingerprint,
+          by: uid, actor, sourceFingerprint,
         }].slice(-100);
         tx.set(doc, state);
         return state;

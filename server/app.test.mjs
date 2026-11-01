@@ -26,9 +26,9 @@ function fakeFirestore() {
 
 async function serve(store, investigate, extractIntake, ragAgent) {
   const app = createApp({ store, investigate, ...(extractIntake ? { extractIntake } : {}), ...(ragAgent ? { ragAgent } : {}), verifyToken: async token => {
-    if (token === 'judge') return { uid: 'judge', isAnonymous: true };
+    if (token === 'judge') return { uid: 'judge', displayName: 'Judge Demo reviewer', isAnonymous: true };
     if (!['alice', 'bob'].includes(token)) throw new Error('Invalid token');
-    return { uid: token, isAnonymous: false };
+    return { uid: token, displayName: `${token[0].toUpperCase()}${token.slice(1)} Reviewer`, email: `${token}@example.com`, isAnonymous: false };
   } });
   const server = app.listen(0);
   await once(server, 'listening');
@@ -320,6 +320,9 @@ test('cash lodgements, stock counts, and completed review history are versioned 
     const initial = (await request('/workspace')).data;
     assert.deepEqual(initial.cashReview.proposals.map(row => row.bankId), ['BNK-008', 'BNK-009']);
     assert.equal(initial.stockReview.summary.varianceItems, 2);
+    const replacement = await request('/import/bank', { csv: 'id,date,description,amount\nNEW-001,2026-11-01,New period credit,100.00', version: initial.version });
+    assert.equal(replacement.status, 409);
+    assert.match(replacement.data.error, /Complete the current review/);
 
     const cash = await request('/cash-deposits', { cashEntryIds: ['CASH-001', 'CASH-002'], bankId: 'BNK-008', version: initial.version });
     assert.equal(cash.status, 200, JSON.stringify(cash.data));
@@ -331,13 +334,59 @@ test('cash lodgements, stock counts, and completed review history are versioned 
     assert.equal(stock.status, 200, JSON.stringify(stock.data));
     assert.equal(stock.data.stockReview.summary.varianceItems, 0);
 
-    const completed = await request('/review-cycles/complete', { title: 'October 2026 close', version: stock.data.version });
+    const blocked = await request('/review-cycles/complete', { title: 'October 2026 close', version: stock.data.version });
+    assert.equal(blocked.status, 400);
+    assert.match(blocked.data.error, /Resolve all review items first/);
+    const uncommented = await request('/resolutions', { kind: 'invoice', recordId: stock.data.unresolvedInvoices[0].id, comment: ' ', version: stock.data.version });
+    assert.equal(uncommented.status, 400);
+    assert.match(uncommented.data.error, /review comment/i);
+
+    let workspace = stock.data;
+    while (workspace.proposals.length) {
+      const proposal = workspace.proposals[0];
+      const approved = await request('/approvals', { invoiceId: proposal.invoiceId, bankId: proposal.bankId, version: workspace.version });
+      assert.equal(approved.status, 200, JSON.stringify(approved.data));
+      workspace = approved.data;
+    }
+    while (workspace.cashReview.proposals.length) {
+      const proposal = workspace.cashReview.proposals[0];
+      const approved = await request('/cash-deposits', { cashEntryIds: proposal.cashEntryIds, bankId: proposal.bankId, version: workspace.version });
+      assert.equal(approved.status, 200, JSON.stringify(approved.data));
+      workspace = approved.data;
+    }
+    while (workspace.unresolvedInvoices.length) {
+      const record = workspace.unresolvedInvoices[0];
+      const resolved = await request('/resolutions', { kind: 'invoice', recordId: record.id, comment: 'Reviewed supporting sales records and approved this exception for period close.', version: workspace.version });
+      assert.equal(resolved.status, 200, JSON.stringify(resolved.data));
+      workspace = resolved.data;
+    }
+    while (workspace.unresolvedBank.length) {
+      const record = workspace.unresolvedBank[0];
+      const resolved = await request('/resolutions', { kind: 'bank', recordId: record.id, comment: 'Reviewed the bank narration and source evidence; classification is documented.', version: workspace.version });
+      assert.equal(resolved.status, 200, JSON.stringify(resolved.data));
+      workspace = resolved.data;
+    }
+    assert.equal(workspace.closeBlockers.total, 0);
+    assert.ok(workspace.manualResolutions.length > 0);
+    assert.equal(workspace.manualResolutions[0].reviewer.displayName, 'Alice Reviewer');
+    assert.equal(workspace.audit.at(-1).actor.email, 'alice@example.com');
+    assert.ok(workspace.totals.manualReviewedKobo !== 0);
+
+    const completed = await request('/review-cycles/complete', { title: 'October 2026 close', version: workspace.version });
     assert.equal(completed.status, 200, JSON.stringify(completed.data));
     assert.equal(completed.data.reviewHistory.length, 1);
-    assert.equal(completed.data.reviewHistory[0].results.approvedCashDeposits, 1);
+    assert.ok(completed.data.reviewHistory[0].results.approvedCashDeposits >= 1);
+    assert.equal(completed.data.reviewHistory[0].results.manualResolutions, workspace.manualResolutions.length);
+    assert.equal(completed.data.reviewHistory[0].completedBy.email, 'alice@example.com');
+    assert.equal(completed.data.reviewHistory[0].audit.at(-1).action, 'exception-resolved');
     assert.equal(completed.data.invoices.length, 0);
     assert.equal(completed.data.bank.length, 0);
     assert.equal(completed.data.cashbook.length, 0);
     assert.equal(completed.data.stockReview.items.length, 0);
+    assert.equal(completed.data.manualResolutions.length, 0);
+    const nextPeriod = await request('/import/bank', { csv: 'id,date,description,amount\nNOV-BNK-001,2026-11-01,November opening credit,100.00', version: completed.data.version });
+    assert.equal(nextPeriod.status, 200, JSON.stringify(nextPeriod.data));
+    assert.equal(nextPeriod.data.bank[0].id, 'NOV-BNK-001');
+    assert.equal(nextPeriod.data.reviewHistory.length, 1, 'starting a new period must preserve completed review history');
   } finally { await new Promise(resolve => server.close(resolve)); }
 });

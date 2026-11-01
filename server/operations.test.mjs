@@ -37,9 +37,16 @@ test('completed review snapshot keeps decision totals without copying raw source
   const state = seedWorkspace();
   state.approved = [{ invoiceId: 'INV-001', bankId: 'BNK-001' }];
   state.cashAllocations = [{ cashEntryIds: ['CASH-001', 'CASH-002'], bankId: 'BNK-008' }];
-  const snapshot = reviewCycleSnapshot(state, 'October close', '2026-10-30T10:00:00.000Z');
+  state.manualResolutions = [{ kind: 'invoice', recordId: 'INV-002', amountKobo: 8_000_000, comment: 'Reviewed', reviewedAt: '2026-10-30T09:00:00.000Z', reviewer: { uid: 'alice', displayName: 'Alice Reviewer' } }];
+  state.audit = [{ action: 'exception-resolved', invoiceId: 'INV-002', at: '2026-10-30T09:00:00.000Z' }];
+  const snapshot = reviewCycleSnapshot(state, 'October close', '2026-10-30T10:00:00.000Z', { uid: 'alice', displayName: 'Alice Reviewer' });
   assert.equal(snapshot.counts.cashbook, 5);
   assert.equal(snapshot.totals.approvedInvoiceKobo, 12_000_000);
   assert.equal(snapshot.totals.bankedCashKobo, 6_300_000);
+  assert.equal(snapshot.totals.reviewedLedgerKobo, 26_300_000);
+  assert.equal(snapshot.results.manualResolutions, 1);
+  assert.equal(snapshot.manualResolutions[0].comment, 'Reviewed');
+  assert.equal(snapshot.audit[0].action, 'exception-resolved');
+  assert.equal(snapshot.completedBy.displayName, 'Alice Reviewer');
   assert.equal('bank' in snapshot, false);
 });

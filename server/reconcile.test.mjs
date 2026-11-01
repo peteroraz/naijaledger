@@ -14,6 +14,13 @@ test('approvals cannot reuse source or approve wrong amount',()=>{
  assert.throws(()=>reconcile(invoices,bank,[{invoiceId:'INV-001',bankId:'BNK-001'},{invoiceId:'INV-001',bankId:'BNK-001'}]));
  assert.throws(()=>reconcile(invoices,bank,[{invoiceId:'INV-002',bankId:'BNK-001'}]));
 });
+test('comment-resolved source IDs are removed from proposals and unresolved queues',()=>{
+ const invoices=sample('invoices','invoices'),bank=sample('bank','bank');
+ const result=reconcile(invoices,bank,[],['BNK-004'],['INV-002']);
+ assert.equal(result.unresolvedInvoices.some(row=>row.id==='INV-002'),false);
+ assert.equal(result.unresolvedBank.some(row=>row.id==='BNK-004'),false);
+ assert.equal(result.proposals.some(row=>row.invoiceId==='INV-002'||row.bankId==='BNK-004'),false);
+});
 test('CSV respects quoted commas and rejects impossible dates',()=>{
  assert.equal(parseCsv('id,date,description,amount\na,2026-10-01,"POS, Terminal",10.00','bank')[0].description,'POS, Terminal');
  assert.throws(()=>parseCsv('id,date,customer,amount\na,2026-02-30,One,10','invoices'),/invalid date/);

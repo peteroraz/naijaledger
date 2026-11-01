@@ -13,15 +13,71 @@ import { seedWorkspace } from './store.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 export const DEMO_LIMITS = Object.freeze({ intake: 3, investigate: 5, agent: 3 });
+const resolutionSets = state => {
+  const manualResolutions = state.manualResolutions || [];
+  return {
+    manualResolutions,
+    invoiceIds: new Set(manualResolutions.filter(row => row.kind === 'invoice').map(row => row.recordId)),
+    bankIds: new Set(manualResolutions.filter(row => row.kind === 'bank').map(row => row.recordId)),
+  };
+};
+
+const calculateReview = state => {
+  const cashbook = state.cashbook || [];
+  const cashAllocations = state.cashAllocations || [];
+  const resolutions = resolutionSets(state);
+  const blockedBankIds = [...cashAllocations.map(row => row.bankId), ...resolutions.bankIds];
+  const invoiceReview = reconcile(state.invoices, state.bank, state.approved || [], blockedBankIds, [...resolutions.invoiceIds]);
+  const cashReview = reconcileCashbook(cashbook, state.bank, cashAllocations, [
+    ...invoiceReview.matches.map(row => row.bankId),
+    ...invoiceReview.proposals.map(row => row.bankId),
+    ...resolutions.bankIds,
+  ]);
+  const cashBankIds = new Set([...cashReview.matches, ...cashReview.proposals].map(row => row.bankId));
+  const unresolvedBank = invoiceReview.unresolvedBank.filter(row => !cashBankIds.has(row.id));
+  const manualReviewedInvoiceKobo = resolutions.manualResolutions
+    .filter(row => row.kind === 'invoice').reduce((total, row) => total + Number(row.amountKobo || 0), 0);
+  const manualReviewedBankKobo = resolutions.manualResolutions
+    .filter(row => row.kind === 'bank').reduce((total, row) => total + Number(row.amountKobo || 0), 0);
+  return {
+    invoiceReview, cashReview, unresolvedBank, manualResolutions: resolutions.manualResolutions,
+    closeBlockers: {
+      invoiceProposals: invoiceReview.proposals.length,
+      cashProposals: cashReview.proposals.length,
+      unresolvedInvoices: invoiceReview.unresolvedInvoices.length,
+      unresolvedBank: unresolvedBank.length,
+      total: invoiceReview.proposals.length + cashReview.proposals.length + invoiceReview.unresolvedInvoices.length + unresolvedBank.length,
+    },
+    manualTotals: {
+      invoiceKobo: manualReviewedInvoiceKobo,
+      bankKobo: manualReviewedBankKobo,
+      reviewedKobo: manualReviewedInvoiceKobo + manualReviewedBankKobo,
+    },
+  };
+};
+
+const actorSnapshot = identity => ({
+  uid: identity.uid,
+  displayName: identity.displayName || (identity.isAnonymous ? 'Judge Demo reviewer' : 'Signed-in reviewer'),
+  email: identity.email || null,
+  isAnonymous: identity.isAnonymous === true,
+});
+
 const view = (state, isDemo = false) => {
   const cashbook = state.cashbook || [];
   const cashAllocations = state.cashAllocations || [];
-  const invoiceReview = reconcile(state.invoices, state.bank, state.approved || [], cashAllocations.map(row => row.bankId));
-  const cashReview = reconcileCashbook(cashbook, state.bank, cashAllocations, [...invoiceReview.matches, ...invoiceReview.proposals].map(row => row.bankId));
-  const cashBankIds = new Set([...cashReview.matches, ...cashReview.proposals].map(row => row.bankId));
-  return { ...invoiceReview, unresolvedBank: invoiceReview.unresolvedBank.filter(row => !cashBankIds.has(row.id)),
+  const review = calculateReview(state);
+  const totals = {
+    ...review.invoiceReview.totals,
+    manualReviewedInvoiceKobo: review.manualTotals.invoiceKobo,
+    manualReviewedBankKobo: review.manualTotals.bankKobo,
+    manualReviewedKobo: review.manualTotals.reviewedKobo,
+    reviewedLedgerKobo: review.invoiceReview.totals.approvedKobo + review.cashReview.totals.bankedCashKobo + review.manualTotals.reviewedKobo,
+  };
+  return { ...review.invoiceReview, totals, unresolvedBank: review.unresolvedBank,
   invoices: state.invoices, bank: state.bank, approved: state.approved,
-  cashbook, cashAllocations, cashReview, stockReview: reconcileStock(state.stock || []),
+  cashbook, cashAllocations, cashReview: review.cashReview, manualResolutions: review.manualResolutions,
+  closeBlockers: review.closeBlockers, stockReview: reconcileStock(state.stock || []),
   reviewCycle: state.reviewCycle || { title: 'Current review', startedAt: state.updatedAt }, reviewHistory: state.reviewHistory || [],
   version: state.version, imports: state.imports, briefs: state.briefs || {}, agentAnswers: state.agentAnswers || [], intakeDraft: state.intakeDraft || null,
   audit: state.audit || [], updatedAt: state.updatedAt,
@@ -117,6 +173,7 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
       req.uid = typeof identity === 'string' ? identity : identity?.uid;
       req.isAnonymous = typeof identity === 'object' && identity?.isAnonymous === true;
       if (!req.uid) throw new Error('Invalid identity');
+      req.actor = actorSnapshot(typeof identity === 'string' ? { uid: identity, isAnonymous: false } : identity);
       next();
     }
     catch { res.status(401).json({ error: 'Session expired; sign in again' }); }
@@ -129,7 +186,7 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
       return {
         ...seedWorkspace(),
         demoUsage: current.demoUsage || { intake: 0, investigate: 0, agent: 0 },
-        audit: [{ action: 'demo-reset', at: resetAt }],
+        audit: [{ action: 'demo-reset', at: resetAt, by: req.uid, actor: req.actor }],
         updatedAt: resetAt,
       };
     });
@@ -146,6 +203,7 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
         action: 'intake-extracted', at: draft.createdAt,
         sources: draft.sources.length, rows: draft.candidates.length,
         sourceFingerprint: draft.sourceFingerprint,
+        by: req.uid, actor: req.actor,
       }].slice(-100);
       return current;
     });
@@ -171,7 +229,7 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
         action: 'intake-committed', at: new Date().toISOString(), rows: accepted.length, invoices: invoices.length, cashSales: cashSales.length,
         sources: new Set(accepted.map(row => row.record.sourceHash)).size,
         sourceFingerprint: current.intakeDraft.sourceFingerprint,
-        by: req.uid,
+        by: req.uid, actor: req.actor,
       }].slice(-100);
       current.intakeDraft = null;
       return current;
@@ -184,7 +242,7 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
       if (!current.intakeDraft || current.intakeDraft.id !== draftId) {
         const error = new Error('The extraction draft changed; reload the workspace'); error.status = 409; throw error;
       }
-      current.audit = [...(current.audit || []), { action: 'intake-discarded', at: new Date().toISOString(), sourceFingerprint: current.intakeDraft.sourceFingerprint }].slice(-100);
+      current.audit = [...(current.audit || []), { action: 'intake-discarded', at: new Date().toISOString(), sourceFingerprint: current.intakeDraft.sourceFingerprint, by: req.uid, actor: req.actor }].slice(-100);
       current.intakeDraft = null;
       return current;
     });
@@ -195,13 +253,18 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
     if (!['invoices', 'bank', 'cashbook', 'stock'].includes(kind) || typeof req.body?.csv !== 'string') return res.status(400).json({ error: 'Expected invoices, bank, cashbook or stock CSV' });
     const rows = parseCsv(req.body.csv, kind);
     const state = await store.change(req.uid, req.body.version, current => {
+      if ((current[kind] || []).length > 0) {
+        const error = new Error(`Complete the current review before replacing its ${kind} records. The completed period will remain in review history.`);
+        error.status = 409;
+        throw error;
+      }
       current[kind] = rows;
       current.imports[kind] = sha256(req.body.csv);
       if (['invoices', 'bank'].includes(kind)) current.approved = [];
       if (['bank', 'cashbook'].includes(kind)) current.cashAllocations = [];
       current.briefs = {};
       if (kind === 'invoices') current.intakeDraft = null;
-      current.audit = [...(current.audit || []), { action: 'imported', kind, rows: rows.length, sourceHash: current.imports[kind], at: new Date().toISOString() }].slice(-100);
+      current.audit = [...(current.audit || []), { action: 'imported', kind, rows: rows.length, sourceHash: current.imports[kind], at: new Date().toISOString(), by: req.uid, actor: req.actor }].slice(-100);
       return current;
     });
     res.json(view(state, req.isAnonymous));
@@ -209,12 +272,12 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
   app.post('/api/approvals', route(async (req, res) => {
     const { invoiceId, bankId, version } = req.body || {};
     const state = await store.change(req.uid, version, current => {
-      const proposal = reconcile(current.invoices, current.bank, current.approved || [], (current.cashAllocations || []).map(row => row.bankId)).proposals
+      const proposal = calculateReview(current).invoiceReview.proposals
         .find(p => p.invoiceId === invoiceId && p.bankId === bankId);
       if (!proposal) { const error = new Error('Pair is not an available proposal'); error.status = 400; throw error; }
-      current.approved.push({ invoiceId, bankId, reviewedAt: new Date().toISOString(), reviewedBy: req.uid });
+      current.approved.push({ invoiceId, bankId, reviewedAt: new Date().toISOString(), reviewedBy: req.uid, reviewer: req.actor });
       current.briefs = {};
-      current.audit = [...(current.audit || []), { action: 'approved', invoiceId, bankId, by: req.uid, at: new Date().toISOString() }].slice(-100);
+      current.audit = [...(current.audit || []), { action: 'approved', invoiceId, bankId, by: req.uid, actor: req.actor, at: new Date().toISOString() }].slice(-100);
       return current;
     });
     res.json(view(state, req.isAnonymous));
@@ -222,12 +285,40 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
   app.post('/api/cash-deposits', route(async (req, res) => {
     const { cashEntryIds, bankId, version } = req.body || {};
     const state = await store.change(req.uid, version, current => {
-      const invoiceReview = reconcile(current.invoices, current.bank, current.approved || [], (current.cashAllocations || []).map(row => row.bankId));
-      const proposal = reconcileCashbook(current.cashbook || [], current.bank, current.cashAllocations || [], [...invoiceReview.matches, ...invoiceReview.proposals].map(row => row.bankId)).proposals
+      const proposal = calculateReview(current).cashReview.proposals
         .find(row => row.bankId === bankId && JSON.stringify(row.cashEntryIds) === JSON.stringify(cashEntryIds));
       if (!proposal) { const error = new Error('Cash lodgement is not an available proposal'); error.status = 400; throw error; }
-      current.cashAllocations = [...(current.cashAllocations || []), { cashEntryIds, bankId, reviewedAt: new Date().toISOString(), reviewedBy: req.uid, frequency: proposal.frequency }];
-      current.audit = [...(current.audit || []), { action: 'cash-deposit-approved', bankId, cashEntryIds, rows: cashEntryIds.length, by: req.uid, at: new Date().toISOString() }].slice(-100);
+      current.cashAllocations = [...(current.cashAllocations || []), { cashEntryIds, bankId, reviewedAt: new Date().toISOString(), reviewedBy: req.uid, reviewer: req.actor, frequency: proposal.frequency }];
+      current.audit = [...(current.audit || []), { action: 'cash-deposit-approved', bankId, cashEntryIds, rows: cashEntryIds.length, by: req.uid, actor: req.actor, at: new Date().toISOString() }].slice(-100);
+      return current;
+    });
+    res.json(view(state, req.isAnonymous));
+  }));
+  app.post('/api/resolutions', route(async (req, res) => {
+    const kind = req.body?.kind;
+    const recordId = String(req.body?.recordId || '').trim().slice(0, 160);
+    const comment = String(req.body?.comment || '').replace(/\s+/g, ' ').trim().slice(0, 1000);
+    if (!['invoice', 'bank'].includes(kind) || !recordId) return res.status(400).json({ error: 'Select an unresolved invoice or bank entry' });
+    if (comment.length < 5) return res.status(400).json({ error: 'Add a review comment of at least 5 characters before resolving this record' });
+    const state = await store.change(req.uid, req.body?.version, current => {
+      const review = calculateReview(current);
+      const source = (kind === 'invoice' ? review.invoiceReview.unresolvedInvoices : review.unresolvedBank)
+        .find(row => row.id === recordId);
+      if (!source) { const error = new Error('This record is no longer unresolved; reload the current review'); error.status = 409; throw error; }
+      const reviewedAt = new Date().toISOString();
+      const resolution = {
+        id: `resolution-${kind}-${recordId}-${reviewedAt.replace(/\D/g, '').slice(0, 14)}`,
+        kind, recordId, amountKobo: source.amountKobo, comment, reviewedAt,
+        reviewer: req.actor, metaInvestigated: kind === 'invoice' && Boolean(current.briefs?.[recordId]),
+        sourceHash: current.imports?.[kind === 'invoice' ? 'invoices' : 'bank'] || null,
+      };
+      current.manualResolutions = [...(current.manualResolutions || []), resolution];
+      current.audit = [...(current.audit || []), {
+        action: 'exception-resolved', kind, recordId,
+        ...(kind === 'invoice' ? { invoiceId: recordId } : { bankId: recordId }),
+        amountKobo: source.amountKobo, comment, at: reviewedAt, by: req.uid, actor: req.actor,
+        metaInvestigated: resolution.metaInvestigated,
+      }].slice(-100);
       return current;
     });
     res.json(view(state, req.isAnonymous));
@@ -251,7 +342,7 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
     });
     const state = await store.change(req.uid, req.body?.version, current => {
       current.stock = rows; current.imports.stock = sha256(JSON.stringify(rows));
-      current.audit = [...(current.audit || []), { action: 'stock-count-saved', rows: rows.length, by: req.uid, at: new Date().toISOString() }].slice(-100);
+      current.audit = [...(current.audit || []), { action: 'stock-count-saved', rows: rows.length, by: req.uid, actor: req.actor, at: new Date().toISOString() }].slice(-100);
       return current;
     });
     res.json(view(state, req.isAnonymous));
@@ -260,13 +351,19 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
     const title = String(req.body?.title || '').replace(/\s+/g, ' ').trim().slice(0, 80);
     if (!title) return res.status(400).json({ error: 'Name the completed review period' });
     const state = await store.change(req.uid, req.body?.version, current => {
+      const review = calculateReview(current);
+      if (review.closeBlockers.total > 0) {
+        const error = new Error(`Resolve all review items first: ${review.closeBlockers.unresolvedInvoices} invoice exceptions, ${review.closeBlockers.unresolvedBank} bank exceptions, ${review.closeBlockers.invoiceProposals + review.closeBlockers.cashProposals} match proposals remain`);
+        error.status = 400;
+        throw error;
+      }
       const completedAt = new Date().toISOString();
-      const snapshot = reviewCycleSnapshot(current, title, completedAt);
+      const snapshot = reviewCycleSnapshot(current, title, completedAt, req.actor);
       current.reviewHistory = [...(current.reviewHistory || []), snapshot].slice(-12);
       current.invoices = []; current.bank = []; current.cashbook = []; current.stock = [];
-      current.approved = []; current.cashAllocations = []; current.briefs = {}; current.intakeDraft = null; current.imports = {};
+      current.approved = []; current.cashAllocations = []; current.manualResolutions = []; current.briefs = {}; current.intakeDraft = null; current.imports = {};
       current.reviewCycle = { title: 'New review', startedAt: completedAt };
-      current.audit = [{ action: 'review-cycle-started', at: completedAt, completedReviewId: snapshot.id, by: req.uid }];
+      current.audit = [{ action: 'review-cycle-started', at: completedAt, completedReviewId: snapshot.id, by: req.uid, actor: req.actor }];
       return current;
     });
     res.json(view(state, req.isAnonymous));
@@ -279,7 +376,7 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
     const evidence = evidenceFor(state, invoiceId);
     await consumeDemoModelCall(req, 'investigate');
     const brief = await investigate(evidence);
-    const saved = await store.saveBrief(req.uid, version, invoiceId, brief);
+    const saved = await store.saveBrief(req.uid, version, invoiceId, brief, req.actor);
     res.json({ invoiceId, brief, workspace: view(saved, req.isAnonymous) });
   }));
   app.post('/api/agent/query', route(async (req, res) => {
@@ -290,7 +387,7 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
     if (state.version !== version) return res.status(409).json({ error: 'Workspace changed; reload before asking the Evidence Agent' });
     await consumeDemoModelCall(req, 'agent');
     const answer = await ragAgent.answer({ uid: req.uid, state, question });
-    const saved = await store.saveAgentAnswer(req.uid, version, answer);
+    const saved = await store.saveAgentAnswer(req.uid, version, answer, req.actor);
     res.json({ answer, workspace: view(saved, req.isAnonymous) });
   }));
   app.post('/api/agent/reviews', route(async (req, res) => {
@@ -298,7 +395,7 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
     if (typeof sourceFingerprint !== 'string' || typeof createdAt !== 'string') {
       return res.status(400).json({ error: 'Select a current Evidence Agent answer' });
     }
-    const state = await store.reviewAgentAnswer(req.uid, version, sourceFingerprint, createdAt);
+    const state = await store.reviewAgentAnswer(req.uid, version, sourceFingerprint, createdAt, req.actor);
     res.json(view(state, req.isAnonymous));
   }));
   app.post('/api/brief-reviews', route(async (req, res) => {
@@ -306,7 +403,7 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
     if (typeof invoiceId !== 'string' || typeof sourceFingerprint !== 'string') {
       return res.status(400).json({ error: 'Select a current evidence brief' });
     }
-    const state = await store.reviewBrief(req.uid, version, invoiceId, sourceFingerprint);
+    const state = await store.reviewBrief(req.uid, version, invoiceId, sourceFingerprint, req.actor);
     res.json(view(state, req.isAnonymous));
   }));
   app.get('/api/handover', route(async (req, res) => {
