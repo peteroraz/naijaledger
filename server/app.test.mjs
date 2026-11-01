@@ -183,7 +183,7 @@ test('Evidence Agent answers are source-bound, persistent, reviewable, and isola
         calculation: 'NGN 80,000 - NGN 78,800 = NGN 1,200', confidence: 'medium',
         missingEvidence: ['POS settlement report'], nextCheck: 'Check the settlement report.',
         decisionBoundary: 'A human must approve any match.', model: 'muse-spark-1.3', createdAt, sourceFingerprint: fingerprint,
-        retrieval: { mode: 'hybrid-vector', chunksConsidered: 40, selectedCount: 8, embeddingModel: 'gemini-embedding-001', evidence: [{ id: 'invoice:INV-002', type: 'invoice', title: 'INV-002', label: 'Invoice INV-002', locator: 'source row 3', verificationStatus: 'source_record', retrievalReason: 'exact source ID', retrievalScore: 0.1 }] },
+        retrieval: { mode: 'structured-evidence', chunksConsidered: 40, selectedCount: 8, evidence: [{ id: 'invoice:INV-002', type: 'invoice', title: 'INV-002', label: 'Invoice INV-002', locator: 'source row 3', verificationStatus: 'source_record', retrievalReason: 'exact source ID', retrievalScore: 0.1 }] },
         verification: { status: 'checks_passed', checkedAt: createdAt, checks: [{ id: 'citations', label: 'Citation integrity', passed: true, detail: '1 cited source checked.' }], modelReview: { model: 'muse-spark-1.3', verdict: 'supported', checkedClaims: 2, issues: [] }, humanReview: { status: 'pending' } },
       };
     },
@@ -200,7 +200,7 @@ test('Evidence Agent answers are source-bound, persistent, reviewable, and isola
     const initial = await request('alice', '/workspace');
     const generated = await request('alice', '/agent/query', { question: 'Why is INV-002 unresolved?', version: initial.data.version });
     assert.equal(generated.status, 200, JSON.stringify(generated.data));
-    assert.equal(generated.data.answer.retrieval.mode, 'hybrid-vector');
+    assert.equal(generated.data.answer.retrieval.mode, 'structured-evidence');
     assert.equal(generated.data.workspace.agentAnswers.length, 1);
     assert.equal(generated.data.workspace.audit.at(-1).action, 'rag-asked');
     assert.equal((await request('bob', '/workspace')).data.agentAnswers.length, 0);
@@ -371,12 +371,14 @@ test('cash lodgements, stock counts, and completed review history are versioned 
     assert.equal(workspace.manualResolutions[0].reviewer.displayName, 'Alice Reviewer');
     assert.equal(workspace.audit.at(-1).actor.email, 'alice@example.com');
     assert.ok(workspace.totals.manualReviewedKobo !== 0);
+    assert.equal(workspace.totals.reconciledKobo, workspace.totals.approvedKobo + workspace.cashReview.totals.bankedCashKobo);
 
     const completed = await request('/review-cycles/complete', { title: 'October 2026 close', version: workspace.version });
     assert.equal(completed.status, 200, JSON.stringify(completed.data));
     assert.equal(completed.data.reviewHistory.length, 1);
     assert.ok(completed.data.reviewHistory[0].results.approvedCashDeposits >= 1);
     assert.equal(completed.data.reviewHistory[0].results.manualResolutions, workspace.manualResolutions.length);
+    assert.equal(completed.data.reviewHistory[0].totals.reconciledKobo, workspace.totals.reconciledKobo);
     assert.equal(completed.data.reviewHistory[0].completedBy.email, 'alice@example.com');
     assert.equal(completed.data.reviewHistory[0].audit.at(-1).action, 'exception-resolved');
     assert.equal(completed.data.invoices.length, 0);

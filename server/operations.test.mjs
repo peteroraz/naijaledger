@@ -43,7 +43,8 @@ test('completed review snapshot keeps decision totals without copying raw source
   assert.equal(snapshot.counts.cashbook, 5);
   assert.equal(snapshot.totals.approvedInvoiceKobo, 12_000_000);
   assert.equal(snapshot.totals.bankedCashKobo, 6_300_000);
-  assert.equal(snapshot.totals.reviewedLedgerKobo, 26_300_000);
+  assert.equal(snapshot.totals.reconciledKobo, 18_300_000);
+  assert.equal(snapshot.totals.manualReviewedInvoiceKobo, 8_000_000);
   assert.equal(snapshot.results.manualResolutions, 1);
   assert.equal(snapshot.manualResolutions[0].comment, 'Reviewed');
   assert.equal(snapshot.audit[0].action, 'exception-resolved');

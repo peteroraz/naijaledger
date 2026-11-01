@@ -48,7 +48,7 @@ export function createReviewPack(state, generatedAt = new Date().toISOString()) 
     manualReviewedInvoiceKobo,
     manualReviewedBankKobo,
     manualReviewedKobo: manualReviewedInvoiceKobo + manualReviewedBankKobo,
-    reviewedLedgerKobo: invoiceReview.totals.approvedKobo + cashReview.totals.bankedCashKobo + manualReviewedInvoiceKobo + manualReviewedBankKobo,
+    reconciledKobo: invoiceReview.totals.approvedKobo + cashReview.totals.bankedCashKobo,
   };
   return {
     title: 'NaijaLedger review pack',
@@ -137,7 +137,7 @@ export async function buildReviewWorkbook(report) {
     ['Bank transactions', report.bank.length, 'Approved matches', report.matches.length],
     ['Unresolved invoices', report.unresolvedInvoices.length, 'Unresolved bank entries', report.unresolvedBank.length],
     ['Invoiced total', amount(report.totals.invoicedKobo), 'Bank credit total', amount(report.totals.bankCreditsKobo)],
-    ['Approved invoice total', amount(report.totals.approvedKobo), 'AI evidence briefs', Object.keys(report.briefs).length],
+    ['Approved invoice total', amount(report.totals.approvedKobo), 'Reconciled value', amount(report.totals.reconciledKobo)],
     ['Comment-resolved invoices', amount(report.totals.manualReviewedInvoiceKobo), 'Comment-resolved bank entries', amount(report.totals.manualReviewedBankKobo)],
     ['Cashbook total', amount(report.cashReview.totals.cashSalesKobo), 'Approved cash lodgements', report.cashReview.matches.length],
     ['Stock items', report.stockReview.summary.totalItems, 'Stock variances', report.stockReview.summary.varianceItems],
@@ -155,7 +155,7 @@ export async function buildReviewWorkbook(report) {
     summary.getCell(`A${row}`).font = { name: 'Arial', size: 10, bold: true, color: { argb: `FF${MUTED}` } };
     summary.getCell(`C${row}`).font = { name: 'Arial', size: 10, bold: true, color: { argb: `FF${MUTED}` } };
   }
-  ['B9', 'D9', 'B10', 'B11', 'D11', 'B12'].forEach(ref => { summary.getCell(ref).numFmt = MONEY_FORMAT; });
+  ['B9', 'D9', 'B10', 'D10', 'B11', 'D11', 'B12'].forEach(ref => { summary.getCell(ref).numFmt = MONEY_FORMAT; });
   ['B5', 'B6'].forEach(ref => { summary.getCell(ref).numFmt = 'yyyy-mm-dd hh:mm'; });
   summary.addRow([]);
   const hashHeading = summary.addRow(['Source fingerprints']);
@@ -245,9 +245,9 @@ export async function buildReviewWorkbook(report) {
   addRowsSheet(workbook, 'Review History', [
     { header: 'Review ID', key: 'id' }, { header: 'Title', key: 'title' }, { header: 'Started', key: 'startedAt' }, { header: 'Completed', key: 'completedAt' },
     { header: 'Invoices', key: 'invoices' }, { header: 'Cash entries', key: 'cashbook' }, { header: 'Bank rows', key: 'bank' }, { header: 'Stock items', key: 'stock' },
-    { header: 'Reviewed ledger value (NGN)', key: 'settlement', style: { numFmt: MONEY_FORMAT } }, { header: 'Manual resolutions', key: 'manualResolutions' },
+    { header: 'Reconciled value (NGN)', key: 'settlement', style: { numFmt: MONEY_FORMAT } }, { header: 'Manual resolutions', key: 'manualResolutions' },
     { header: 'Stock variances', key: 'stockVariances' }, { header: 'Completed by', key: 'completedBy' },
-  ], report.reviewHistory.map(row => ({ ...row, startedAt: dateValue(row.startedAt), completedAt: dateValue(row.completedAt), ...row.counts, settlement: amount(row.totals.reviewedLedgerKobo ?? (row.totals.approvedInvoiceKobo + row.totals.bankedCashKobo)), manualResolutions: row.results.manualResolutions || 0, stockVariances: row.results.stockVarianceItems, completedBy: row.completedBy?.displayName || row.completedBy?.email || row.completedBy?.uid || '' })), { A: 22, B: 28, C: 21, D: 21, E: 11, F: 13, G: 11, H: 12, I: 24, J: 18, K: 16, L: 28 });
+  ], report.reviewHistory.map(row => ({ ...row, startedAt: dateValue(row.startedAt), completedAt: dateValue(row.completedAt), ...row.counts, settlement: amount(row.totals.reconciledKobo ?? (row.totals.approvedInvoiceKobo + row.totals.bankedCashKobo)), manualResolutions: row.results.manualResolutions || 0, stockVariances: row.results.stockVarianceItems, completedBy: row.completedBy?.displayName || row.completedBy?.email || row.completedBy?.uid || '' })), { A: 22, B: 28, C: 21, D: 21, E: 11, F: 13, G: 11, H: 12, I: 24, J: 18, K: 16, L: 28 });
 
   const briefRows = Object.entries(report.briefs).map(([invoiceId, brief]) => ({
     invoiceId, createdAt: dateValue(brief.createdAt), model: brief.model, briefStatus: brief.status,
@@ -415,7 +415,7 @@ export async function buildReviewPdf(report) {
       ['Bank transactions', report.bank.length, 'Approved matches', report.matches.length],
       ['Unresolved invoices', report.unresolvedInvoices.length, 'Unresolved bank entries', report.unresolvedBank.length],
       ['Invoiced total', ngn(report.totals.invoicedKobo), 'Bank credit total', ngn(report.totals.bankCreditsKobo)],
-      ['Approved total', ngn(report.totals.approvedKobo), 'AI evidence briefs', Object.keys(report.briefs).length],
+      ['Approved total', ngn(report.totals.approvedKobo), 'Reconciled value', ngn(report.totals.reconciledKobo)],
       ['Comment-resolved invoices', ngn(report.totals.manualReviewedInvoiceKobo), 'Comment-resolved bank', ngn(report.totals.manualReviewedBankKobo)],
       ['Cashbook total', ngn(report.cashReview.totals.cashSalesKobo), 'Approved cash deposits', report.cashReview.matches.length],
       ['Stock items', report.stockReview.summary.totalItems, 'Stock variances', report.stockReview.summary.varianceItems],
@@ -467,8 +467,8 @@ export async function buildReviewPdf(report) {
     else paragraph('No stock records loaded.', { color: `#${MUTED}` });
 
     section('Completed review history');
-    if (report.reviewHistory.length) pdfTable(doc, ['Completed', 'Review', 'Sources', 'Reviewed ledger', 'Manual', 'Stock'], report.reviewHistory.map(row => [
-      iso(row.completedAt).slice(0, 10), row.title, `${row.counts.invoices} inv / ${row.counts.cashbook} cash / ${row.counts.bank} bank`, ngn(row.totals.reviewedLedgerKobo ?? (row.totals.approvedInvoiceKobo + row.totals.bankedCashKobo)), row.results.manualResolutions || 0, row.results.stockVarianceItems,
+    if (report.reviewHistory.length) pdfTable(doc, ['Completed', 'Review', 'Sources', 'Reconciled', 'Manual', 'Stock'], report.reviewHistory.map(row => [
+      iso(row.completedAt).slice(0, 10), row.title, `${row.counts.invoices} inv / ${row.counts.cashbook} cash / ${row.counts.bank} bank`, ngn(row.totals.reconciledKobo ?? (row.totals.approvedInvoiceKobo + row.totals.bankedCashKobo)), row.results.manualResolutions || 0, row.results.stockVarianceItems,
     ]), [68, 118, 108, 92, 45, 45], ['left', 'left', 'left', 'right', 'right', 'right']);
     else paragraph('No completed review cycles yet.', { color: `#${MUTED}` });
 

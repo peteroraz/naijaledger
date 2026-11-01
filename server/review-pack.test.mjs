@@ -40,7 +40,7 @@ function reviewedState() {
     calculation: 'NGN 80,000 - NGN 78,800 = NGN 1,200', confidence: 'medium', missingEvidence: ['POS settlement statement'],
     nextCheck: 'Inspect the POS settlement statement.', decisionBoundary: 'Human approval is required.', model: 'muse-spark-1.3',
     createdAt: '2026-10-29T14:12:00.000Z', sourceFingerprint: 'c'.repeat(64),
-    retrieval: { mode: 'hybrid-vector', chunksConsidered: 42, selectedCount: 8, evidence: [{ id: 'invoice:INV-002', type: 'invoice', locator: 'source row 3', retrievalReason: 'exact source ID' }] },
+    retrieval: { mode: 'structured-evidence', chunksConsidered: 42, selectedCount: 8, evidence: [{ id: 'invoice:INV-002', type: 'invoice', locator: 'source row 3', retrievalReason: 'exact source ID' }] },
     verification: { status: 'checks_passed', checkedAt: '2026-10-29T14:13:00.000Z', checks: [{ id: 'citations', label: 'Citation integrity', passed: true, detail: '1 citation checked.' }], modelReview: { verdict: 'supported', checkedClaims: 2, issues: [] }, humanReview: { status: 'reviewed', reviewedAt: '2026-10-29T14:16:00.000Z' } },
   }];
   state.audit = [
@@ -53,6 +53,8 @@ function reviewedState() {
 
 test('review pack PDF is a complete printable document', async () => {
   const report = createReviewPack(reviewedState(), '2026-10-29T14:20:00.000Z');
+  assert.equal(report.totals.reconciledKobo, report.totals.approvedKobo + report.cashReview.totals.bankedCashKobo);
+  assert.equal(report.totals.manualReviewedInvoiceKobo, 8_000_000);
   const file = await buildReviewPdf(report);
   assert.ok(Buffer.isBuffer(file));
   assert.equal(file.subarray(0, 5).toString(), '%PDF-');
