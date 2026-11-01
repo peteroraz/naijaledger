@@ -74,19 +74,31 @@ export function reconcileStock(rows = []) {
   return { items, summary: { totalItems: items.length, balancedItems: items.filter(row => row.status === 'balanced').length, varianceItems: items.filter(row => row.status !== 'balanced').length } };
 }
 
-export function reviewCycleSnapshot(state, title, completedAt = new Date().toISOString()) {
+export function reviewCycleSnapshot(state, title, completedAt = new Date().toISOString(), completedBy = null) {
   const cash = reconcileCashbook(state.cashbook || [], state.bank || [], state.cashAllocations || []);
   const stock = reconcileStock(state.stock || []);
+  const manualResolutions = state.manualResolutions || [];
+  const manualReviewedInvoiceKobo = manualResolutions.filter(row => row.kind === 'invoice').reduce((total, row) => total + Number(row.amountKobo || 0), 0);
+  const manualReviewedBankKobo = manualResolutions.filter(row => row.kind === 'bank').reduce((total, row) => total + Number(row.amountKobo || 0), 0);
+  const approvedInvoiceKobo = (state.approved || []).reduce((total, allocation) => total + Number(state.invoices.find(row => row.id === allocation.invoiceId)?.amountKobo || 0), 0);
+  const reviewedLedgerKobo = approvedInvoiceKobo + cash.totals.bankedCashKobo + manualReviewedInvoiceKobo + manualReviewedBankKobo;
   return {
     id: `review-${completedAt.replace(/\D/g, '').slice(0, 14)}`,
-    title, startedAt: state.reviewCycle?.startedAt || state.updatedAt, completedAt,
+    title, startedAt: state.reviewCycle?.startedAt || state.updatedAt, completedAt, completedBy,
     sourceHashes: { ...(state.imports || {}) },
     counts: { invoices: state.invoices.length, bank: state.bank.length, cashbook: (state.cashbook || []).length, stock: stock.items.length },
     totals: {
       invoicedKobo: sumKobo(state.invoices), bankCreditsKobo: sumKobo(state.bank.filter(row => row.amountKobo > 0)),
-      approvedInvoiceKobo: (state.approved || []).reduce((total, allocation) => total + Number(state.invoices.find(row => row.id === allocation.invoiceId)?.amountKobo || 0), 0),
-      cashSalesKobo: cash.totals.cashSalesKobo, bankedCashKobo: cash.totals.bankedCashKobo,
+      approvedInvoiceKobo, cashSalesKobo: cash.totals.cashSalesKobo, bankedCashKobo: cash.totals.bankedCashKobo,
+      manualReviewedInvoiceKobo, manualReviewedBankKobo, reviewedLedgerKobo,
     },
-    results: { approvedInvoiceMatches: (state.approved || []).length, approvedCashDeposits: (state.cashAllocations || []).length, stockVarianceItems: stock.summary.varianceItems },
+    results: {
+      approvedInvoiceMatches: (state.approved || []).length,
+      approvedCashDeposits: (state.cashAllocations || []).length,
+      manualResolutions: manualResolutions.length,
+      stockVarianceItems: stock.summary.varianceItems,
+    },
+    manualResolutions: structuredClone(manualResolutions),
+    audit: structuredClone(state.audit || []),
   };
 }

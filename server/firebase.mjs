@@ -14,6 +14,8 @@ export function firebaseServices() {
       const decoded = await getAuth().verifyIdToken(token);
       return {
         uid: decoded.uid,
+        displayName: decoded.name || null,
+        email: decoded.email || null,
         isAnonymous: decoded.firebase?.sign_in_provider === 'anonymous',
       };
     },
