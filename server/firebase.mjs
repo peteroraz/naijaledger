@@ -2,7 +2,6 @@ import { initializeApp, applicationDefault } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import { getFirestore } from 'firebase-admin/firestore';
 import { createFirestoreStore } from './store.mjs';
-import { createFirestoreRagIndex } from './rag-store.mjs';
 
 export function firebaseServices() {
   const projectId = process.env.FIREBASE_PROJECT_ID;
@@ -20,6 +19,5 @@ export function firebaseServices() {
       };
     },
     store: createFirestoreStore(db),
-    ragIndex: createFirestoreRagIndex(db),
   };
 }

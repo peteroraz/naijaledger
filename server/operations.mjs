@@ -81,7 +81,7 @@ export function reviewCycleSnapshot(state, title, completedAt = new Date().toISO
   const manualReviewedInvoiceKobo = manualResolutions.filter(row => row.kind === 'invoice').reduce((total, row) => total + Number(row.amountKobo || 0), 0);
   const manualReviewedBankKobo = manualResolutions.filter(row => row.kind === 'bank').reduce((total, row) => total + Number(row.amountKobo || 0), 0);
   const approvedInvoiceKobo = (state.approved || []).reduce((total, allocation) => total + Number(state.invoices.find(row => row.id === allocation.invoiceId)?.amountKobo || 0), 0);
-  const reviewedLedgerKobo = approvedInvoiceKobo + cash.totals.bankedCashKobo + manualReviewedInvoiceKobo + manualReviewedBankKobo;
+  const reconciledKobo = approvedInvoiceKobo + cash.totals.bankedCashKobo;
   return {
     id: `review-${completedAt.replace(/\D/g, '').slice(0, 14)}`,
     title, startedAt: state.reviewCycle?.startedAt || state.updatedAt, completedAt, completedBy,
@@ -90,7 +90,7 @@ export function reviewCycleSnapshot(state, title, completedAt = new Date().toISO
     totals: {
       invoicedKobo: sumKobo(state.invoices), bankCreditsKobo: sumKobo(state.bank.filter(row => row.amountKobo > 0)),
       approvedInvoiceKobo, cashSalesKobo: cash.totals.cashSalesKobo, bankedCashKobo: cash.totals.bankedCashKobo,
-      manualReviewedInvoiceKobo, manualReviewedBankKobo, reviewedLedgerKobo,
+      manualReviewedInvoiceKobo, manualReviewedBankKobo, reconciledKobo,
     },
     results: {
       approvedInvoiceMatches: (state.approved || []).length,

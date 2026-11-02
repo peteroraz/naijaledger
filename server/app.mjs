@@ -72,7 +72,7 @@ const view = (state, isDemo = false) => {
     manualReviewedInvoiceKobo: review.manualTotals.invoiceKobo,
     manualReviewedBankKobo: review.manualTotals.bankKobo,
     manualReviewedKobo: review.manualTotals.reviewedKobo,
-    reviewedLedgerKobo: review.invoiceReview.totals.approvedKobo + review.cashReview.totals.bankedCashKobo + review.manualTotals.reviewedKobo,
+    reconciledKobo: review.invoiceReview.totals.approvedKobo + review.cashReview.totals.bankedCashKobo,
   };
   return { ...review.invoiceReview, totals, unresolvedBank: review.unresolvedBank,
   invoices: state.invoices, bank: state.bank, approved: state.approved,

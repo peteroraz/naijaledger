@@ -183,20 +183,11 @@ function lexicalRetrieve(chunks, question, limit = 14) {
   }).filter(chunk => chunk.lexicalScore > 0).sort((a, b) => b.lexicalScore - a.lexicalScore || a.id.localeCompare(b.id)).slice(0, limit);
 }
 
-function hybridMerge(chunks, lexical, semantic, limit = 10) {
-  const source = new Map(chunks.map(chunk => [chunk.id, chunk]));
-  const scores = new Map();
-  lexical.forEach((chunk, index) => scores.set(chunk.id, (scores.get(chunk.id) || 0) + 1 / (20 + index)));
-  semantic.forEach((chunk, index) => scores.set(chunk.id, (scores.get(chunk.id) || 0) + 1 / (20 + index)));
-  const ranked = [...scores.entries()].sort((a, b) => b[1] - a[1]).map(([id, score]) => {
-    const lexicalMatch = lexical.find(chunk => chunk.id === id);
-    const semanticMatch = semantic.find(chunk => chunk.id === id);
-    return {
-      ...(source.get(id) || semanticMatch), retrievalScore: Number(score.toFixed(5)),
-      retrievalReason: [lexicalMatch?.retrievalReason, semanticMatch ? 'semantic similarity' : ''].filter(Boolean).join(' · '),
-    };
-  });
-  const selected = ranked.slice(0, limit);
+function selectEvidence(chunks, lexical, limit = 10) {
+  const selected = lexical.slice(0, limit).map((chunk, index) => ({
+    ...chunk,
+    retrievalScore: Number((1 / (20 + index)).toFixed(5)),
+  }));
   if (!selected.some(chunk => chunk.type === 'policy')) {
     const policy = lexical.find(chunk => chunk.type === 'policy') || chunks.find(chunk => chunk.id === 'policy:KB-072');
     if (policy) selected.splice(Math.max(0, limit - 1), 1, { ...policy, retrievalScore: 0, retrievalReason: policy.retrievalReason || 'answer policy' });
@@ -284,35 +275,20 @@ async function generateAnswer(question, selected, sourceFingerprint, { apiKey, f
   return answer;
 }
 
-export function createRagAgent({ ragIndex = null, embedder = null, apiKey = process.env.MODEL_API_KEY, fetcher = fetch, generator = generateAnswer } = {}) {
+export function createRagAgent({ apiKey = process.env.MODEL_API_KEY, fetcher = fetch, generator = generateAnswer } = {}) {
   return {
-    async answer({ uid, state, question }) {
+    async answer({ state, question }) {
       const cleanedQuestion = clean(question, 600);
       if (cleanedQuestion.length < 4) throw ragError('Ask a complete question about the evidence', 400);
       if (!apiKey) throw ragError('Meta Model API is not configured on the server', 503);
       const chunks = buildRagChunks(state);
       const sourceFingerprint = sha256(JSON.stringify(chunks.map(({ id, sourceHash, text }) => ({ id, sourceHash, text }))));
       const lexical = lexicalRetrieve(chunks, cleanedQuestion);
-      let semantic = [];
-      let mode = 'structured-lexical';
-      if (ragIndex && embedder) {
-        try {
-          if (await ragIndex.fingerprint(uid) !== sourceFingerprint) {
-            const embeddings = await embedder.embedDocuments(chunks.map(chunk => chunk.text));
-            await ragIndex.replace(uid, sourceFingerprint, chunks, embeddings, embedder.model);
-          }
-          semantic = await ragIndex.search(uid, await embedder.embedQuery(cleanedQuestion), 14);
-          mode = 'hybrid-vector';
-        } catch {
-          mode = 'structured-lexical-fallback';
-        }
-      }
-      const selected = hybridMerge(chunks, lexical, semantic);
+      const selected = selectEvidence(chunks, lexical);
       if (!selected.length) throw ragError('No relevant evidence was found in this workspace', 422);
       const result = await generator(cleanedQuestion, selected, sourceFingerprint, { apiKey, fetcher });
       result.retrieval = {
-        mode, chunksConsidered: chunks.length, selectedCount: selected.length,
-        embeddingModel: mode === 'hybrid-vector' ? embedder.model : null,
+        mode: 'structured-evidence', chunksConsidered: chunks.length, selectedCount: selected.length,
         evidence: selected.map(({ id, type, title, label, locator, verificationStatus, retrievalReason, retrievalScore }) => ({
           id, type, title, label, locator, verificationStatus, retrievalReason, retrievalScore,
         })),
