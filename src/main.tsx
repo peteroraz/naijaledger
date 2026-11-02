@@ -9,7 +9,8 @@ type Match = { invoiceId: string; bankId: string; amountKobo: number; reason?: s
 type CashProposal = { cashEntryIds: string[]; bankId: string; amountKobo: number; entryCount: number; frequency: 'daily' | 'weekly'; startDate: string; endDate: string; reason: string };
 type StockItem = { sku: string; item: string; unit: string; openingQty: number; receivedQty: number; soldQty: number; adjustmentQty: number; countedQty: number; expectedQty?: number; varianceQty?: number; status?: 'balanced' | 'shortage' | 'surplus' };
 type Reviewer = { uid: string; displayName: string; email?: string | null; isAnonymous?: boolean };
-type ManualResolution = { id: string; kind: 'invoice' | 'bank'; recordId: string; amountKobo: number; comment: string; reviewedAt: string; reviewer: Reviewer; metaInvestigated?: boolean; sourceHash?: string | null };
+type ManualResolution = { id: string; kind: 'invoice' | 'bank' | 'cash' | 'stock'; recordId: string; amountKobo: number; varianceQty?: number | null; comment: string; reviewedAt: string; reviewer: Reviewer; metaInvestigated?: boolean; sourceHash?: string | null };
+type RejectedProposal = { id: string; kind: 'invoice' | 'cash'; invoiceId?: string | null; bankId: string; cashEntryIds: string[]; amountKobo: number; comment: string; rejectedAt: string; reviewer: Reviewer };
 type AuditEvent = { action: string; kind?: string; rows?: number; sources?: number; invoiceId?: string; bankId?: string; recordId?: string; comment?: string; by?: string; actor?: Reviewer; at: string };
 type ReviewHistory = { id: string; title: string; startedAt: string; completedAt: string; completedBy?: Reviewer; counts: { invoices: number; bank: number; cashbook: number; stock: number }; totals: { invoicedKobo: number; bankCreditsKobo: number; approvedInvoiceKobo: number; cashSalesKobo: number; bankedCashKobo: number; manualReviewedInvoiceKobo?: number; manualReviewedBankKobo?: number; reconciledKobo?: number }; results: { approvedInvoiceMatches: number; approvedCashDeposits: number; manualResolutions?: number; stockVarianceItems: number }; manualResolutions?: ManualResolution[]; audit?: AuditEvent[] };
 type Verification = {
@@ -57,10 +58,11 @@ type Workspace = {
   cashbook: Row[]; cashAllocations: { cashEntryIds: string[]; bankId: string; reviewedAt: string; reviewedBy: string }[];
   cashReview: { matches: CashProposal[]; proposals: CashProposal[]; unbankedCash: Row[]; totals: { cashSalesKobo: number; bankedCashKobo: number; proposedCashKobo: number } };
   stockReview: { items: StockItem[]; summary: { totalItems: number; balancedItems: number; varianceItems: number } };
+  unresolvedStock: StockItem[]; rejectedProposals: RejectedProposal[];
   reviewCycle: { title: string; startedAt: string }; reviewHistory: ReviewHistory[];
-  totals: { invoicedKobo: number; bankCreditsKobo: number; approvedKobo: number; manualReviewedInvoiceKobo: number; manualReviewedBankKobo: number; manualReviewedKobo: number; reconciledKobo: number };
+  totals: { invoicedKobo: number; bankCreditsKobo: number; approvedKobo: number; manualReviewedInvoiceKobo: number; manualReviewedBankKobo: number; manualReviewedCashKobo: number; manualReviewedKobo: number; reconciledKobo: number; ledgerReviewedKobo: number };
   manualResolutions: ManualResolution[];
-  closeBlockers: { invoiceProposals: number; cashProposals: number; unresolvedInvoices: number; unresolvedBank: number; total: number };
+  closeBlockers: { invoiceProposals: number; cashProposals: number; unresolvedInvoices: number; unresolvedBank: number; unbankedCash: number; stockVariances: number; pendingDraft: number; pendingBriefs: number; pendingAgentAnswers: number; total: number };
   version: number; imports: Record<string, string>; briefs: Record<string, Brief>; agentAnswers: AgentAnswer[]; intakeDraft: IntakeDraft | null; updatedAt: string;
   audit: AuditEvent[];
   demo: { isDemo: boolean; limits: { intake: number; investigate: number; agent: number }; usage: { intake: number; investigate: number; agent: number } };
@@ -77,6 +79,15 @@ const workspaceViews: { id: WorkspaceView; label: string; shortLabel: string }[]
 const isWorkspaceView = (value: string | null): value is WorkspaceView => workspaceViews.some(view => view.id === value);
 const money = (n: number) => new Intl.NumberFormat('en-NG', { style: 'currency', currency: 'NGN' }).format(n / 100);
 const reviewerLabel = (reviewer?: Reviewer) => reviewer?.displayName || reviewer?.email || reviewer?.uid || 'Reviewer';
+const authMessage = (error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error || '');
+  if (message.includes('popup-closed-by-user')) return 'The sign-in window was closed before authentication finished.';
+  if (message.includes('popup-blocked')) return 'Your browser blocked the sign-in window. Allow pop-ups for this site and retry.';
+  if (message.includes('network-request-failed')) return 'The sign-in service could not be reached. Check your connection and retry.';
+  if (message.includes('api-key-not-valid')) return 'Firebase sign-in is not configured for this deployment.';
+  if (message.includes('operation-not-allowed')) return 'This sign-in method is not enabled in Firebase.';
+  return 'Sign-in could not be completed. Please retry.';
+};
 const json = (body: unknown): RequestInit => ({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 
 async function api<T>(user: User, path: string, options: RequestInit = {}): Promise<T> {
@@ -105,12 +116,17 @@ async function downloadApiFile(user: User, path: string, filename: string) {
 
 function activityText(event: Workspace['audit'][number]) {
   if (event.action === 'imported') return `Imported ${event.rows} ${event.kind} rows`;
+  if (event.action === 'source-replaced') return `Replaced the active ${event.kind} source`;
+  if (event.action === 'source-cleared') return `Cleared the active ${event.kind} source`;
   if (event.action === 'intake-extracted') return `Meta extracted ${event.rows} candidates from ${event.sources} sources`;
   if (event.action === 'intake-committed') return `Added ${event.rows} human-reviewed sales records`;
   if (event.action === 'intake-discarded') return 'Discarded a document extraction draft';
   if (event.action === 'demo-reset') return 'Reset the Judge Demo sample workspace';
   if (event.action === 'approved') return `Approved ${event.invoiceId} ↔ ${event.bankId}`;
   if (event.action === 'cash-deposit-approved') return `Approved cash lodgement → ${event.bankId}`;
+  if (event.action === 'proposal-rejected') return `Rejected a ${event.kind} proposal`;
+  if (event.action === 'proposal-reopened') return `Reopened a ${event.kind} proposal`;
+  if (event.action === 'decision-reopened') return 'Reopened a reviewed decision';
   if (event.action === 'stock-count-saved') return `Saved ${event.rows} stock-count items`;
   if (event.action === 'review-cycle-started') return 'Archived the completed review and started a clean cycle';
   if (event.action === 'exception-resolved') return `Resolved ${event.kind} ${event.recordId || event.invoiceId || event.bankId} with a review comment`;
@@ -131,7 +147,7 @@ function Welcome() {
     if (!auth) return;
     setError(''); setBusy('google');
     try { await signInWithPopup(auth, new GoogleAuthProvider()); }
-    catch (e) { setError((e as Error).message); }
+    catch (e) { setError(authMessage(e)); }
     finally { setBusy(''); }
   }
   async function enterDemo() {
@@ -139,8 +155,8 @@ function Welcome() {
     setError(''); setBusy('demo');
     try { await signInAnonymously(auth); }
     catch (e) {
-      const message = (e as Error).message;
-      setError(message.includes('operation-not-allowed') ? 'Judge Demo is awaiting Anonymous sign-in activation in Firebase.' : message);
+      const message = e instanceof Error ? e.message : '';
+      setError(message.includes('operation-not-allowed') ? 'Judge Demo is awaiting Anonymous sign-in activation in Firebase.' : authMessage(e));
     } finally { setBusy(''); }
   }
   return <main className="welcome">
@@ -152,8 +168,8 @@ function Welcome() {
         <div className="welcome-points"><span>01 · Capture any sales record</span><span>02 · Review exact matches</span><span>03 · Investigate with Muse Spark</span></div>
       </section>
       <section className="welcome-card"><div className="welcome-mark">₦</div><p className="eyebrow">YOUR SECURE SPACE</p>
-        <h2>Start with a sample business.</h2>
-        <p>We’ll load synthetic sales and bank records into your own persistent workspace. Your approvals and AI briefs remain available after you return.</p>
+        <h2>Open your private review workspace.</h2>
+        <p>Google sign-in opens a clean workspace for your own records. Judge Demo loads a separate synthetic business with live Meta features.</p>
         {firebaseReady ? <><button className="primary-large" disabled={!!busy} onClick={() => void login()}>{busy === 'google' ? 'Opening Google…' : 'Continue with Google'} <span>→</span></button><div className="login-divider"><span>or</span></div><button className="judge-entry" disabled={!!busy} onClick={() => void enterDemo()}><span className="judge-spark">✦</span><span><b>{busy === 'demo' ? 'Preparing Judge Demo…' : 'Enter Judge Demo'}</b><small>No account · synthetic records · live Meta models</small></span><i>→</i></button></>
           : <div className="setup-note" role="status">Firebase is not configured yet. Add the web app values in <code>.env.local</code>, then restart Vite. See README setup.</div>}
         {error && <div className="error" role="alert">{error}</div>}
@@ -164,8 +180,8 @@ function Welcome() {
   </main>;
 }
 
-function EvidenceBrief({ brief, bank, onReview, reviewing }: { brief: Brief; bank: Row[]; onReview: () => void; reviewing: boolean }) {
-  const cited = (id: string) => bank.find(row => row.id === id);
+function EvidenceBrief({ brief, bank, invoices, onReview, reviewing }: { brief: Brief; bank: Row[]; invoices: Row[]; onReview: () => void; reviewing: boolean }) {
+  const cited = (id: string) => [...invoices, ...bank].find(row => row.id === id);
   return <div className="brief" aria-label="Meta evidence brief">
     <div className="brief-heading"><span className="spark">✦</span><div><strong>Muse Spark evidence brief</strong><small>Unverified hypothesis · {new Date(brief.createdAt).toLocaleString('en-NG')}</small></div><span className="model-badge">{brief.model}</span></div>
     <p className="brief-summary">{brief.summary}</p>
@@ -221,11 +237,14 @@ function Desk({ user }: { user: User }) {
   const [resolutionComments, setResolutionComments] = useState<Record<string, string>>({});
   const [agentQuestion, setAgentQuestion] = useState('Why is INV-002 unresolved, and what evidence should I check next?');
   const [activeView, setActiveView] = useState<WorkspaceView>(() => {
+    const linked = window.location.hash.replace(/^#/, '');
+    if (isWorkspaceView(linked)) return linked;
     const saved = window.sessionStorage.getItem('naijaledger-workspace-view');
     return isWorkspaceView(saved) ? saved : 'overview';
   });
   const recorderRef = useRef<{ recorder: MediaRecorder; stream: MediaStream } | null>(null);
-  const refresh = () => api<Workspace>(user, '/workspace').then(setData).catch(e => setError(e.message));
+  const tabRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const refresh = () => api<Workspace>(user, '/workspace').then(workspace => { setData(workspace); setError(''); }).catch(e => setError(e.message));
   useEffect(() => { void refresh(); }, [user.uid]);
   useEffect(() => {
     if (data?.intakeDraft) setSelectedDrafts(new Set(data.intakeDraft.candidates.map(row => row.draftId)));
@@ -234,20 +253,35 @@ function Desk({ user }: { user: User }) {
   useEffect(() => { if (data) setStockDraft(data.stockReview.items.map(({ expectedQty: _expected, varianceQty: _variance, status: _status, ...row }) => row)); }, [data?.version]);
   useEffect(() => { if (data) setCycleTitle(data.reviewCycle.title); }, [data?.reviewCycle.startedAt]);
   useEffect(() => { window.sessionStorage.setItem('naijaledger-workspace-view', activeView); }, [activeView]);
+  useEffect(() => {
+    const followHash = () => { const linked = window.location.hash.replace(/^#/, ''); if (isWorkspaceView(linked)) setActiveView(linked); };
+    window.addEventListener('hashchange', followHash);
+    return () => window.removeEventListener('hashchange', followHash);
+  }, []);
 
   function openView(view: WorkspaceView) {
     setActiveView(view);
+    window.history.replaceState(null, '', `#${view}`);
     window.requestAnimationFrame(() => document.querySelector('.workspace-navigation')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  }
+
+  function moveTab(event: React.KeyboardEvent<HTMLButtonElement>, index: number) {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const nextIndex = event.key === 'Home' ? 0 : event.key === 'End' ? workspaceViews.length - 1
+      : (index + (event.key === 'ArrowRight' ? 1 : -1) + workspaceViews.length) % workspaceViews.length;
+    const next = workspaceViews[nextIndex].id;
+    openView(next); tabRefs.current[next]?.focus();
   }
 
   function addIntakeFiles(files: FileList | File[]) {
     const selected = Array.from(files);
     if (!selected.length) return;
     const next = [...intakeFiles, ...selected];
-    if (next.length > 8) return setError('Choose no more than 8 source files');
-    const oversized = selected.find(file => file.size > 15 * 1024 * 1024);
-    if (oversized) return setError(`${oversized.name} exceeds the 15 MB per-file limit`);
-    if (next.reduce((sum, file) => sum + file.size, 0) > 40 * 1024 * 1024) return setError('Combined source files exceed the 40 MB limit');
+    if (next.length > 6) return setError('Choose no more than 6 source files');
+    const oversized = selected.find(file => file.size > 10 * 1024 * 1024);
+    if (oversized) return setError(`${oversized.name} exceeds the 10 MB per-file limit`);
+    if (next.reduce((sum, file) => sum + file.size, 0) > 28 * 1024 * 1024) return setError('Combined source files exceed the 28 MB limit');
     const unsupported = selected.find(file => !/\.(png|jpe?g|webp|pdf|docx|xlsx|txt|wav|mp3|m4a|ogg|webm|aac)$/i.test(file.name));
     if (unsupported) return setError(`${unsupported.name} is not a supported source type`);
     setError('');
@@ -323,8 +357,25 @@ function Desk({ user }: { user: User }) {
 
   async function importFile(kind: 'invoices' | 'bank' | 'cashbook' | 'stock', file?: File) {
     if (!file || !data) return;
+    const existing = kind === 'cashbook' ? data.cashbook.length : kind === 'stock' ? data.stockReview.items.length : data[kind].length;
+    let reason = '';
+    if (existing) {
+      if (!window.confirm(`Replace ${existing} active ${kind} record${existing === 1 ? '' : 's'}? Related decisions and AI answers will be reopened or cleared, and the reason will be retained in the audit trail.`)) return;
+      reason = window.prompt('Why are you replacing this active source? This will be saved in the audit trail.')?.trim() || '';
+      if (reason.length < 5) return setError('Add an audit reason of at least 5 characters before replacing records.');
+    }
     setBusy(kind); setError('');
-    try { setData(await api<Workspace>(user, `/import/${kind}`, json({ csv: await file.text(), version: data.version }))); }
+    try { setData(await api<Workspace>(user, `/import/${kind}`, json({ csv: await file.text(), version: data.version, confirmReplace: existing > 0, reason }))); }
+    catch (e) { setError((e as Error).message); void refresh(); }
+    finally { setBusy(''); }
+  }
+  async function clearSource(kind: 'invoices' | 'bank' | 'cashbook' | 'stock') {
+    if (!data) return;
+    const reason = window.prompt(`Why are you clearing the active ${kind} source? This will be saved in the audit trail.`)?.trim() || '';
+    if (reason.length < 5) return setError('Add an audit reason of at least 5 characters before clearing records.');
+    if (!window.confirm(`Clear the active ${kind} records and affected decisions? Completed review history will not be changed.`)) return;
+    setBusy(`clear-${kind}`); setError('');
+    try { setData(await api<Workspace>(user, `/sources/${kind}/clear`, json({ comment: reason, version: data.version }))); }
     catch (e) { setError((e as Error).message); void refresh(); }
     finally { setBusy(''); }
   }
@@ -342,6 +393,34 @@ function Desk({ user }: { user: User }) {
     catch (e) { setError((e as Error).message); void refresh(); }
     finally { setBusy(''); }
   }
+  async function rejectProposal(kind: 'invoice' | 'cash', proposal: Match | CashProposal) {
+    if (!data) return;
+    const comment = window.prompt('Why is this proposed match incorrect? The reason will remain in the audit trail.')?.trim() || '';
+    if (comment.length < 5) return setError('Add a rejection reason of at least 5 characters.');
+    setBusy(`reject-${'invoiceId' in proposal ? proposal.invoiceId : proposal.bankId}`); setError('');
+    try {
+      setData(await api<Workspace>(user, '/proposals/reject', json({ kind, ...proposal, comment, version: data.version })));
+    } catch (e) { setError((e as Error).message); void refresh(); }
+    finally { setBusy(''); }
+  }
+  async function reopenDecision(payload: Record<string, unknown>) {
+    if (!data) return;
+    const comment = window.prompt('Why are you reopening this decision? The reason will remain in the audit trail.')?.trim() || '';
+    if (comment.length < 5) return setError('Add a reopen reason of at least 5 characters.');
+    setBusy('decision-reopen'); setError('');
+    try { setData(await api<Workspace>(user, '/decisions/reopen', json({ ...payload, comment, version: data.version }))); }
+    catch (e) { setError((e as Error).message); void refresh(); }
+    finally { setBusy(''); }
+  }
+  async function reopenProposal(rejection: RejectedProposal) {
+    if (!data) return;
+    const comment = window.prompt('Why should this rejected proposal be reconsidered?')?.trim() || '';
+    if (comment.length < 5) return setError('Add a reopen reason of at least 5 characters.');
+    setBusy('proposal-reopen'); setError('');
+    try { setData(await api<Workspace>(user, '/proposals/reopen', json({ rejectionId: rejection.id, comment, version: data.version }))); }
+    catch (e) { setError((e as Error).message); void refresh(); }
+    finally { setBusy(''); }
+  }
   async function saveStock() {
     if (!data) return;
     setBusy('stock-save'); setError('');
@@ -349,7 +428,7 @@ function Desk({ user }: { user: User }) {
     catch (e) { setError((e as Error).message); void refresh(); }
     finally { setBusy(''); }
   }
-  async function resolveException(kind: 'invoice' | 'bank', recordId: string) {
+  async function resolveException(kind: 'invoice' | 'bank' | 'cash' | 'stock', recordId: string) {
     if (!data) return;
     const key = `${kind}:${recordId}`;
     const comment = (resolutionComments[key] || '').trim();
@@ -420,8 +499,8 @@ function Desk({ user }: { user: User }) {
     import: data.intakeDraft?.candidates.length || 0,
     reconcile: data.proposals.length + data.cashReview.proposals.length,
     evidence: data.unresolvedInvoices.length,
-    stock: data.stockReview.summary.varianceItems,
-    review: data.unresolvedBank.length,
+    stock: data.unresolvedStock.length,
+    review: data.closeBlockers.total,
   } : {};
   return <main>
     <header><Brand /><div className="account"><span>{user.isAnonymous ? 'Judge Demo' : user.displayName || user.email || 'Workspace'}</span><button className="quiet" onClick={() => auth && void signOut(auth)}>{user.isAnonymous ? 'Exit demo' : 'Sign out'}</button></div></header>
@@ -430,7 +509,7 @@ function Desk({ user }: { user: User }) {
     {data && <>
       <div className="workspace-navigation">
         <nav className="workspace-tabs" aria-label="NaijaLedger workspace" role="tablist">
-          {workspaceViews.map(view => <button type="button" role="tab" aria-selected={activeView === view.id} aria-controls={`panel-${view.id}`} className={activeView === view.id ? 'active' : ''} key={view.id} onClick={() => openView(view.id)}><span>{view.label}</span>{viewCounts[view.id] ? <b aria-label={`${viewCounts[view.id]} items`}>{viewCounts[view.id]}</b> : null}</button>)}
+          {workspaceViews.map((view, index) => <button type="button" role="tab" id={`tab-${view.id}`} aria-selected={activeView === view.id} tabIndex={activeView === view.id ? 0 : -1} ref={element => { tabRefs.current[view.id] = element; }} className={activeView === view.id ? 'active' : ''} key={view.id} onKeyDown={event => moveTab(event, index)} onClick={() => openView(view.id)}><span>{view.label}</span>{viewCounts[view.id] ? <b aria-label={`${viewCounts[view.id]} items`}>{viewCounts[view.id]}</b> : null}</button>)}
         </nav>
         <label className="workspace-select"><span>Workspace area</span><select value={activeView} onChange={event => openView(event.target.value as WorkspaceView)}>{workspaceViews.map(view => <option value={view.id} key={view.id}>{view.shortLabel}{viewCounts[view.id] ? ` (${viewCounts[view.id]})` : ''}</option>)}</select></label>
         <div className="cycle-chip"><span>Active review</span><strong>{data.reviewCycle.title}</strong></div>
@@ -443,7 +522,7 @@ function Desk({ user }: { user: User }) {
       </section>}
       {activeView === 'overview' && <div className="workspace-panel" id="panel-overview" role="tabpanel" aria-label="Overview">
         <section className="hero dashboard-hero"><div><p className="eyebrow">SALES → CASH → BANK → STOCK</p><h1>Know what settled.<br /><span>Know what needs review.</span></h1><p>Bring in invoices, handwritten cashbooks and stock counts; verify bank lodgements; investigate exceptions with Meta AI.</p></div><div className="hero-note"><strong>Review first</strong><p>Amounts and dates create proposals. Every final allocation stays under human control.</p><small>Private Firebase workspace · {data.reviewCycle.title}</small></div></section>
-        <section className="stats"><article><small>Invoice sales</small><b>{money(data.totals.invoicedKobo)}</b><span>{data.invoices.length} structured records</span></article><article><small>Cashbook takings</small><b>{money(data.cashReview.totals.cashSalesKobo)}</b><span>{data.cashbook.length} cash entries</span></article><article><small>Reconciled value</small><b>{money(data.totals.reconciledKobo)}</b><span>{data.matches.length + data.cashReview.matches.length} approved allocations · manual closures excluded</span></article><article><small>Stock exceptions</small><b>{data.stockReview.summary.varianceItems}</b><span>{data.stockReview.summary.balancedItems}/{data.stockReview.summary.totalItems} items balanced</span></article></section>
+        <section className="stats"><article><small>Invoice sales</small><b>{money(data.totals.invoicedKobo)}</b><span>{data.invoices.length} structured records</span></article><article><small>Cashbook takings</small><b>{money(data.cashReview.totals.cashSalesKobo)}</b><span>{data.cashbook.length} cash entries</span></article><article><small>Ledger reviewed</small><b>{money(data.totals.ledgerReviewedKobo)}</b><span>{money(data.totals.reconciledKobo)} strictly matched · commented exceptions shown separately</span></article><article><small>Stock exceptions</small><b>{data.unresolvedStock.length}</b><span>{data.stockReview.summary.balancedItems}/{data.stockReview.summary.totalItems} items balanced</span></article></section>
         <section className="overview-actions" aria-label="Recommended workflow">
           <button type="button" onClick={() => openView('import')}><span>01</span><div><strong>Bring in records</strong><small>Documents, voice, text or CSV</small></div><i>→</i></button>
           <button type="button" onClick={() => openView('reconcile')}><span>02</span><div><strong>Review matches</strong><small>{data.proposals.length + data.cashReview.proposals.length} proposals need attention</small></div><i>→</i></button>
@@ -460,7 +539,7 @@ function Desk({ user }: { user: User }) {
       </section>
       <section className="card"><div className="sectionhead"><div><p className="eyebrow">META EVIDENCE LAB</p><h2>Unresolved invoices</h2><p>Investigate with Meta when useful, then close each exception only with a human review comment.</p></div><span className="pill">{data.unresolvedInvoices.length} unresolved</span></div><div className="list">{data.unresolvedInvoices.map(inv => {
         const resolutionKey = `invoice:${inv.id}`;
-        return <div className="unresolved" key={inv.id}><div className="unresolved-head"><div><b>{inv.id} · {inv.customer}</b><p>{inv.date} · Source row {inv.sourceRow}</p></div><strong>{money(inv.amountKobo)}</strong><button disabled={!!busy || (data.demo.isDemo && data.demo.usage.investigate >= data.demo.limits.investigate)} onClick={() => void investigate(inv.id)}>{busy === inv.id ? 'Investigating + verifying…' : data.demo.isDemo && data.demo.usage.investigate >= data.demo.limits.investigate ? 'Demo limit reached' : data.briefs[inv.id] ? 'Regenerate brief' : 'Investigate with Meta'}</button></div><p className="consent-note">Meta investigation is optional. If used, this sends the invoice and up to 12 relevant bank credit rows to Meta Model API for a verified evidence brief.</p>{data.briefs[inv.id] && <EvidenceBrief brief={data.briefs[inv.id]} bank={data.bank} onReview={() => void reviewBrief(inv.id, data.briefs[inv.id])} reviewing={busy === `review-${inv.id}`} />}<div className="resolution-box"><div><small>HUMAN RESOLUTION · COMMENT REQUIRED</small><strong>Mark this invoice reviewed and close the exception</strong><p>This records your explanation in the audit trail and reviewed ledger. It does not create a bank match or tax conclusion.</p></div><textarea aria-label={`Resolution comment for ${inv.id}`} maxLength={1000} value={resolutionComments[resolutionKey] || ''} disabled={!!busy} onChange={event => setResolutionComments(current => ({ ...current, [resolutionKey]: event.target.value }))} placeholder="Explain why this invoice can be closed, the evidence checked, and any follow-up needed…"/><button disabled={!!busy || (resolutionComments[resolutionKey] || '').trim().length < 5} onClick={() => void resolveException('invoice', inv.id)}>{busy === `resolve-${resolutionKey}` ? 'Saving audit trail…' : 'Mark reviewed & resolve'}</button></div></div>;
+        return <div className="unresolved" key={inv.id}><div className="unresolved-head"><div><b>{inv.id} · {inv.customer}</b><p>{inv.date} · Source row {inv.sourceRow}</p></div><strong>{money(inv.amountKobo)}</strong><button disabled={!!busy || (data.demo.isDemo && data.demo.usage.investigate >= data.demo.limits.investigate)} onClick={() => void investigate(inv.id)}>{busy === inv.id ? 'Investigating + verifying…' : data.demo.isDemo && data.demo.usage.investigate >= data.demo.limits.investigate ? 'Demo limit reached' : data.briefs[inv.id] ? 'Regenerate brief' : 'Investigate with Meta'}</button></div><p className="consent-note">Meta investigation is optional. If used, this sends the invoice and up to 12 relevant bank credit rows to Meta Model API for a verified evidence brief.</p>{data.briefs[inv.id] && <EvidenceBrief brief={data.briefs[inv.id]} bank={data.bank} invoices={data.invoices} onReview={() => void reviewBrief(inv.id, data.briefs[inv.id])} reviewing={busy === `review-${inv.id}`} />}<div className="resolution-box"><div><small>HUMAN RESOLUTION · COMMENT REQUIRED</small><strong>Mark this invoice reviewed and close the exception</strong><p>This records your explanation in the audit trail and reviewed ledger. It does not create a bank match or tax conclusion.</p></div><textarea aria-label={`Resolution comment for ${inv.id}`} maxLength={1000} value={resolutionComments[resolutionKey] || ''} disabled={!!busy} onChange={event => setResolutionComments(current => ({ ...current, [resolutionKey]: event.target.value }))} placeholder="Explain why this invoice can be closed, the evidence checked, and any follow-up needed…"/><button disabled={!!busy || (resolutionComments[resolutionKey] || '').trim().length < 5} onClick={() => void resolveException('invoice', inv.id)}>{busy === `resolve-${resolutionKey}` ? 'Saving audit trail…' : 'Mark reviewed & resolve'}</button></div></div>;
       })}{data.unresolvedInvoices.length === 0 && <p className="empty">No unresolved invoices. Every invoice exception has an approved match or a commented human resolution.</p>}</div></section>
       </div>}
       {activeView === 'import' && <div className="workspace-panel" id="panel-import" role="tabpanel" aria-label="Import records">
@@ -468,8 +547,8 @@ function Desk({ user }: { user: User }) {
         <div className="sectionhead"><div><p className="eyebrow">01 · META SMART INTAKE</p><h2>Turn messy records into invoices or cashbook entries</h2><p>Upload handwritten daybooks, scans and documents; dictate a cash sale; or type it naturally. Meta classifies each row, and nothing enters the ledger until you confirm it.</p></div><span className="pill">Human-controlled import</span></div>
         <div className="intake-compose">
           <div className="intake-upload">
-            <label className="drop smart-drop"><strong>Documents, scans and voice notes</strong><span>Handwritten daybooks, invoice images, PDF, DOCX, XLSX, TXT, WAV, MP3, M4A, OGG or WEBM</span><input aria-label="Upload sales source documents" type="file" multiple accept=".png,.jpg,.jpeg,.webp,.pdf,.docx,.xlsx,.txt,.wav,.mp3,.m4a,.ogg,.webm,.aac,image/png,image/jpeg,image/webp,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/plain,audio/*" disabled={!!busy} onChange={event => { const selected = Array.from(event.currentTarget.files || []); event.currentTarget.value = ''; addIntakeFiles(selected); }} /><em>Choose up to 8 source files</em><small>15 MB each · 40 MB combined · originals are not stored</small></label>
-            <button type="button" className={`voice-button ${recording ? 'recording' : ''}`} disabled={!!busy} onClick={() => void toggleRecording()}><span>{recording ? '■' : '●'}</span>{recording ? 'Stop and attach voice entry' : 'Record a voice entry'}</button>
+            <label className="drop smart-drop"><strong>Documents, scans and voice notes</strong><span>Handwritten daybooks, invoice images, PDF, DOCX, XLSX, TXT, WAV, MP3, M4A, OGG or WEBM</span><input aria-label="Upload sales source documents" type="file" multiple accept=".png,.jpg,.jpeg,.webp,.pdf,.docx,.xlsx,.txt,.wav,.mp3,.m4a,.ogg,.webm,.aac,image/png,image/jpeg,image/webp,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/plain,audio/*" disabled={!!busy} onChange={event => { const selected = Array.from(event.currentTarget.files || []); event.currentTarget.value = ''; addIntakeFiles(selected); }} /><em>Choose up to 6 source files</em><small>10 MB each · 28 MB combined · originals are not stored</small></label>
+            <button type="button" aria-pressed={recording} aria-label={recording ? 'Stop recording and attach voice entry' : 'Start recording a voice entry'} className={`voice-button ${recording ? 'recording' : ''}`} disabled={!!busy} onClick={() => void toggleRecording()}><span>{recording ? '■' : '●'}</span>{recording ? 'Stop and attach voice entry' : 'Record a voice entry'}</button>
             {intakeFiles.length > 0 && <div className="file-chips" aria-label="Selected source files">{intakeFiles.map((file, index) => <span key={`${file.name}-${file.lastModified}-${index}`}><b>{file.name}</b><small>{(file.size / 1024 / 1024).toFixed(1)} MB</small><button aria-label={`Remove ${file.name}`} disabled={!!busy} onClick={() => setIntakeFiles(current => current.filter((_, itemIndex) => itemIndex !== index))}>×</button></span>)}</div>}
           </div>
           <div className="typed-entry"><label htmlFor="typed-sales-entry"><strong>Type or paste sales / cashbook entries</strong><span>Example: “29 Oct — cash sales ₦18,500; cashier deposited the week’s takings on Friday.”</span></label><textarea id="typed-sales-entry" value={intakeText} disabled={!!busy} maxLength={20000} onChange={event => setIntakeText(event.target.value)} placeholder="Paste notes, copied messages, cashbook lines, or several sales entries here…"/><small>{intakeText.length.toLocaleString()} / 20,000 characters</small></div>
@@ -486,15 +565,19 @@ function Desk({ user }: { user: User }) {
       <section className="card imports csv-lane"><div className="sectionhead"><div><p className="eyebrow">01B · CSV FAST LANE</p><h2>Import structured records</h2><p>Replace the active invoices, bank statement, cashbook or stock count with a clean CSV export.</p></div><span className="pill">Versioned workspace</span></div><div className="filegrid four-up">{(['invoices', 'bank', 'cashbook', 'stock'] as const).map(kind => {
         const labels = { invoices: ['Sales invoices', 'id, date, customer, amount'], bank: ['Bank transactions', 'id, date, description, amount'], cashbook: ['Cashbook entries', 'id, date, customer, description, amount'], stock: ['Stock count', 'sku, item, unit + quantity columns'] } as const;
         const count = kind === 'cashbook' ? data.cashbook.length : kind === 'stock' ? data.stockReview.items.length : data[kind].length;
-        return <label className="drop" key={kind}><strong>{labels[kind][0]}</strong><span>{labels[kind][1]}</span><input aria-label={`Upload ${kind} CSV`} type="file" accept=".csv,text/csv" disabled={!!busy} onChange={e => { void importFile(kind, e.target.files?.[0]); e.target.value = ''; }} /><em>{busy === kind ? 'Importing…' : 'Choose CSV file'}</em><small>{count} rows · SHA-256 {data.imports[kind]?.slice(0, 12) || 'not loaded'}{data.imports[kind] ? '…' : ''}</small></label>;
+        return <div className="source-drop" key={kind}><label className="drop"><strong>{labels[kind][0]}</strong><span>{labels[kind][1]}</span><input aria-label={`Upload ${kind} CSV`} type="file" accept=".csv,text/csv" disabled={!!busy} onChange={e => { void importFile(kind, e.target.files?.[0]); e.target.value = ''; }} /><em>{busy === kind ? 'Importing…' : count ? 'Replace with CSV' : 'Choose CSV file'}</em><small>{count} rows · SHA-256 {data.imports[kind]?.slice(0, 12) || 'not loaded'}{data.imports[kind] ? '…' : ''}</small></label>{count > 0 && <button type="button" className="clear-source" disabled={!!busy} onClick={() => void clearSource(kind)}>{busy === `clear-${kind}` ? 'Clearing…' : 'Clear active source'}</button>}</div>;
       })}</div><p className="fine">Replacing a source clears any affected allocations. Complete the review cycle first when you want its summary preserved in history.</p></section>
       </div>}
       {activeView === 'reconcile' && <div className="workspace-panel" id="panel-reconcile" role="tabpanel" aria-label="Reconcile">
-      <section className="card"><div className="sectionhead"><div><p className="eyebrow">RECONCILIATION DESK</p><h2>Suggested matches</h2><p>Exact amount and date are suggestions. Check source rows before approving.</p></div><span className="pill">{data.proposals.length} to review</span></div><div className="list">{data.proposals.map(p => <div className="pair" key={p.invoiceId}><div><b>{p.invoiceId} <span>↔</span> {p.bankId}</b><p>{row(p.invoiceId, data.invoices)?.customer} · Invoice row {row(p.invoiceId, data.invoices)?.sourceRow} · Bank row {row(p.bankId, data.bank)?.sourceRow}</p><small>{p.reason}</small></div><div className="pair-action"><strong>{money(p.amountKobo)}</strong><button disabled={!!busy} onClick={() => void approve(p)}>{busy === p.invoiceId ? 'Saving…' : 'Approve match'}</button></div></div>)}{data.proposals.length === 0 && <p className="empty">No exact match proposals to review.</p>}</div></section>
+      <section className="card"><div className="sectionhead"><div><p className="eyebrow">RECONCILIATION DESK</p><h2>Suggested matches</h2><p>Exact amount and date are suggestions. Approve or reject each proposal with a reviewable decision.</p></div><span className="pill">{data.proposals.length} to review</span></div><div className="list">{data.proposals.map(p => <div className="pair" key={p.invoiceId}><div><b>{p.invoiceId} <span>↔</span> {p.bankId}</b><p>{row(p.invoiceId, data.invoices)?.customer} · Invoice row {row(p.invoiceId, data.invoices)?.sourceRow} · Bank row {row(p.bankId, data.bank)?.sourceRow}</p><small>{p.reason}</small></div><div className="pair-action"><strong>{money(p.amountKobo)}</strong><button className="quiet" disabled={!!busy} onClick={() => void rejectProposal('invoice', p)}>Reject</button><button disabled={!!busy} onClick={() => void approve(p)}>{busy === p.invoiceId ? 'Saving…' : 'Approve match'}</button></div></div>)}{data.proposals.length === 0 && <p className="empty">No exact match proposals to review.</p>}</div>
+        {data.matches.length > 0 && <details className="decision-register"><summary>{data.matches.length} approved invoice match{data.matches.length === 1 ? '' : 'es'}</summary>{data.matches.map(match => <article key={`${match.invoiceId}-${match.bankId}`}><span>{match.invoiceId} ↔ {match.bankId}</span><b>{money(match.amountKobo)}</b><button className="quiet" disabled={!!busy} onClick={() => void reopenDecision({ type: 'invoice-match', invoiceId: match.invoiceId, bankId: match.bankId })}>Reopen</button></article>)}</details>}
+      </section>
       <section className="card cash-desk"><div className="sectionhead"><div><p className="eyebrow">02B · CASH LODGEMENT DESK</p><h2>Balance the cashbook against bank deposits</h2><p>NaijaLedger groups unallocated cash sales by day and week, then finds exact later bank credits. A teller, deposit slip or lodgement reference must still be checked.</p></div><span className="pill">{data.cashReview.proposals.length} deposit{data.cashReview.proposals.length === 1 ? '' : 's'} to review</span></div>
         <div className="cash-metrics"><div><small>Recorded cash sales</small><strong>{money(data.cashReview.totals.cashSalesKobo)}</strong><span>{data.cashbook.length} entries</span></div><div><small>Approved as banked</small><strong>{money(data.cashReview.totals.bankedCashKobo)}</strong><span>{data.cashReview.matches.length} lodgements</span></div><div><small>Exact proposals</small><strong>{money(data.cashReview.totals.proposedCashKobo)}</strong><span>Awaiting human evidence</span></div></div>
-        <div className="list">{data.cashReview.proposals.map(proposal => <div className="pair cash-pair" key={proposal.bankId}><div><div className="cash-tag">{proposal.frequency} batch · {proposal.entryCount} cash entries</div><b>{proposal.cashEntryIds.join(' + ')} <span>→</span> {proposal.bankId}</b><p>{proposal.startDate === proposal.endDate ? proposal.startDate : `${proposal.startDate} to ${proposal.endDate}`} · Banked {row(proposal.bankId, data.bank)?.date}</p><small>{proposal.reason}</small></div><div className="pair-action"><strong>{money(proposal.amountKobo)}</strong><button disabled={!!busy} onClick={() => void approveCash(proposal)}>{busy === `cash-${proposal.bankId}` ? 'Saving…' : 'Approve lodgement'}</button></div></div>)}{data.cashReview.proposals.length === 0 && <p className="empty">No exact daily or weekly cash-deposit proposal is waiting for review.</p>}</div>
-        {data.cashReview.unbankedCash.length > 0 && <details className="cash-unbanked"><summary>{data.cashReview.unbankedCash.length} cash entries still outside an exact approved or proposed lodgement</summary><div className="tablewrap"><table><thead><tr><th>Cash record</th><th>Date</th><th>Customer / source</th><th>Description</th><th>Amount</th></tr></thead><tbody>{data.cashReview.unbankedCash.map(entry => <tr key={entry.id}><td>{entry.id}</td><td>{entry.date}</td><td>{entry.customer}</td><td>{entry.description}</td><td>{money(entry.amountKobo)}</td></tr>)}</tbody></table></div></details>}
+        <div className="list">{data.cashReview.proposals.map(proposal => <div className="pair cash-pair" key={proposal.bankId}><div><div className="cash-tag">{proposal.frequency} batch · {proposal.entryCount} cash entries</div><b>{proposal.cashEntryIds.join(' + ')} <span>→</span> {proposal.bankId}</b><p>{proposal.startDate === proposal.endDate ? proposal.startDate : `${proposal.startDate} to ${proposal.endDate}`} · Banked {row(proposal.bankId, data.bank)?.date}</p><small>{proposal.reason}</small></div><div className="pair-action"><strong>{money(proposal.amountKobo)}</strong><button className="quiet" disabled={!!busy} onClick={() => void rejectProposal('cash', proposal)}>Reject</button><button disabled={!!busy} onClick={() => void approveCash(proposal)}>{busy === `cash-${proposal.bankId}` ? 'Saving…' : 'Approve lodgement'}</button></div></div>)}{data.cashReview.proposals.length === 0 && <p className="empty">No exact daily or weekly cash-deposit proposal is waiting for review.</p>}</div>
+        {data.cashReview.matches.length > 0 && <details className="decision-register"><summary>{data.cashReview.matches.length} approved cash deposit{data.cashReview.matches.length === 1 ? '' : 's'}</summary>{data.cashReview.matches.map(match => <article key={match.bankId}><span>{match.cashEntryIds.join(' + ')} → {match.bankId}</span><b>{money(match.amountKobo)}</b><button className="quiet" disabled={!!busy} onClick={() => void reopenDecision({ type: 'cash-deposit', bankId: match.bankId })}>Reopen</button></article>)}</details>}
+        {data.cashReview.unbankedCash.length > 0 && <details className="cash-unbanked" open><summary>{data.cashReview.unbankedCash.length} cash entries require a deposit match or commented resolution</summary><div className="bank-review-list">{data.cashReview.unbankedCash.map(entry => { const resolutionKey = `cash:${entry.id}`; return <article key={entry.id}><div className="bank-entry-summary"><div><strong>{entry.id}</strong><small>{entry.date} · {entry.customer}</small><p>{entry.description}</p></div><b>{money(entry.amountKobo)}</b></div><div className="bank-resolution"><textarea aria-label={`Resolution comment for cash entry ${entry.id}`} maxLength={1000} value={resolutionComments[resolutionKey] || ''} disabled={!!busy} onChange={event => setResolutionComments(current => ({ ...current, [resolutionKey]: event.target.value }))} placeholder="Describe the cash retained, timing difference, correction or evidence checked…"/><button disabled={!!busy || (resolutionComments[resolutionKey] || '').trim().length < 5} onClick={() => void resolveException('cash', entry.id)}>Mark reviewed & resolve</button></div></article>; })}</div></details>}
+        {data.rejectedProposals.length > 0 && <details className="decision-register"><summary>{data.rejectedProposals.length} rejected proposal{data.rejectedProposals.length === 1 ? '' : 's'}</summary>{data.rejectedProposals.map(rejection => <article key={rejection.id}><span>{rejection.invoiceId || rejection.cashEntryIds.join(' + ')} → {rejection.bankId}<small>{rejection.comment}</small></span><b>{money(rejection.amountKobo)}</b><button className="quiet" disabled={!!busy} onClick={() => void reopenProposal(rejection)}>Reconsider</button></article>)}</details>}
       </section>
       </div>}
       {activeView === 'stock' && <div className="workspace-panel" id="panel-stock" role="tabpanel" aria-label="Stock">
@@ -505,6 +588,7 @@ function Desk({ user }: { user: User }) {
           const set = (changes: Partial<StockItem>) => setStockDraft(current => current.map((row, rowIndex) => rowIndex === index ? { ...row, ...changes } : row));
           return <tr key={`${item.sku}-${index}`} className={Math.abs(variance) < 0.000001 ? 'stock-balanced' : 'stock-variance'}><td><input aria-label="Stock SKU" value={item.sku} onChange={event => set({ sku: event.target.value })}/><input aria-label="Stock item" value={item.item} placeholder="Item name" onChange={event => set({ item: event.target.value })}/><input aria-label="Stock unit" value={item.unit} placeholder="Unit" onChange={event => set({ unit: event.target.value })}/></td>{(['openingQty', 'receivedQty', 'soldQty', 'adjustmentQty'] as const).map(field => <td key={field}><input aria-label={field} type="number" step="0.001" value={item[field]} onChange={event => set({ [field]: Number(event.target.value) })}/></td>)}<td><b>{expected.toLocaleString()}</b></td><td><input aria-label="Counted quantity" type="number" min="0" step="0.001" value={item.countedQty} onChange={event => set({ countedQty: Number(event.target.value) })}/></td><td><span className={variance === 0 ? 'variance-ok' : variance < 0 ? 'variance-short' : 'variance-over'}>{variance > 0 ? '+' : ''}{variance.toLocaleString()}</span></td><td><button className="row-remove" aria-label={`Remove ${item.item || item.sku}`} onClick={() => setStockDraft(current => current.filter((_, rowIndex) => rowIndex !== index))}>×</button></td></tr>;
         })}</tbody></table></div>
+        {data.unresolvedStock.length > 0 && <div className="stock-resolution-list"><h3>Stock variances requiring review</h3>{data.unresolvedStock.map(item => { const resolutionKey = `stock:${item.sku}`; return <article key={item.sku}><div><strong>{item.sku} · {item.item}</strong><p>Expected {item.expectedQty?.toLocaleString()} {item.unit}; counted {item.countedQty.toLocaleString()}; variance {(item.varianceQty || 0) > 0 ? '+' : ''}{item.varianceQty?.toLocaleString()}.</p></div><textarea aria-label={`Resolution comment for stock ${item.sku}`} maxLength={1000} value={resolutionComments[resolutionKey] || ''} disabled={!!busy} onChange={event => setResolutionComments(current => ({ ...current, [resolutionKey]: event.target.value }))} placeholder="Explain the count check, damage, shrinkage or approved adjustment…"/><button disabled={!!busy || (resolutionComments[resolutionKey] || '').trim().length < 5} onClick={() => void resolveException('stock', item.sku)}>Mark reviewed & resolve</button></article>; })}</div>}
       </section>
       </div>}
       {activeView === 'review' && <div className="workspace-panel" id="panel-review" role="tabpanel" aria-label="Review and export">
@@ -513,9 +597,9 @@ function Desk({ user }: { user: User }) {
         return <article key={entry.id}><div className="bank-entry-summary"><div><strong>{entry.id}</strong><small>{entry.date} · source row {entry.sourceRow}</small><p>{entry.description}</p></div><b>{money(entry.amountKobo)}</b></div><div className="bank-resolution"><textarea aria-label={`Resolution comment for ${entry.id}`} maxLength={1000} value={resolutionComments[resolutionKey] || ''} disabled={!!busy} onChange={event => setResolutionComments(current => ({ ...current, [resolutionKey]: event.target.value }))} placeholder="Comment on the evidence checked and why this bank entry can be closed…"/><button disabled={!!busy || (resolutionComments[resolutionKey] || '').trim().length < 5} onClick={() => void resolveException('bank', entry.id)}>{busy === `resolve-${resolutionKey}` ? 'Saving…' : 'Mark reviewed & resolve'}</button></div></article>;
       })}{data.unresolvedBank.length === 0 && <p className="empty">No unresolved bank entries. Every bank exception has an allocation or a commented human resolution.</p>}</div></section>
       <section className="card handover"><div className="sectionhead"><div><p className="eyebrow">REVIEW TRAIL</p><h2>Close one period without losing its story</h2><p>Download the current evidence pack, or complete this review to preserve a signed summary before loading the next bank statement and records.</p></div><div className="export-actions"><button className="quiet export-pdf" disabled={!!busy} onClick={() => void downloadPack('pdf')}>{busy === 'export-pdf' ? 'Preparing PDF…' : 'Download PDF'}</button><button disabled={!!busy} onClick={() => void downloadPack('xlsx')}>{busy === 'export-xlsx' ? 'Preparing Excel…' : 'Download Excel'}</button></div></div>
-        <div className={`close-readiness ${data.closeBlockers.total ? 'blocked' : 'ready'}`}><strong>{data.closeBlockers.total ? `${data.closeBlockers.total} review item${data.closeBlockers.total === 1 ? '' : 's'} must be closed` : '✓ This period is ready to close'}</strong><span>{data.closeBlockers.unresolvedInvoices} invoice exceptions · {data.closeBlockers.unresolvedBank} bank exceptions · {data.closeBlockers.invoiceProposals + data.closeBlockers.cashProposals} match proposals</span></div>
+        <div className={`close-readiness ${data.closeBlockers.total ? 'blocked' : 'ready'}`}><strong>{data.closeBlockers.total ? `${data.closeBlockers.total} review item${data.closeBlockers.total === 1 ? '' : 's'} must be closed` : '✓ This period is ready to close'}</strong><span>{data.closeBlockers.unresolvedInvoices} invoice · {data.closeBlockers.unresolvedBank} bank · {data.closeBlockers.invoiceProposals + data.closeBlockers.cashProposals} proposals · {data.closeBlockers.unbankedCash} cash · {data.closeBlockers.stockVariances} stock · {data.closeBlockers.pendingDraft + data.closeBlockers.pendingBriefs + data.closeBlockers.pendingAgentAnswers} evidence checkpoints</span></div>
         <div className="cycle-close"><div><small>ACTIVE REVIEW · STARTED {new Date(data.reviewCycle.startedAt).toLocaleDateString('en-NG')}</small><strong>{data.reviewCycle.title}</strong><p>Completing archives source fingerprints, totals, comments, the signed-in reviewer profile, stock variances and the full period audit trail. Active records are then cleared for the next upload.</p></div><div><input aria-label="Completed review name" maxLength={80} value={cycleTitle} onChange={event => setCycleTitle(event.target.value)} placeholder="e.g. October 2026 review"/><button className="danger-soft" disabled={!!busy || !cycleTitle.trim() || data.closeBlockers.total > 0} onClick={() => void completeCycle()}>{busy === 'cycle-complete' ? 'Archiving…' : data.closeBlockers.total ? 'Resolve all items to close' : 'Complete & start new review'}</button></div></div>
-        {data.manualResolutions.length > 0 && <div className="resolution-history"><h3>Commented resolutions in this review</h3>{data.manualResolutions.slice().reverse().map(resolution => <article key={resolution.id}><div><span className="resolution-kind">{resolution.kind}</span><strong>{resolution.recordId} · {money(resolution.amountKobo)}</strong><p>{resolution.comment}</p></div><small>{new Date(resolution.reviewedAt).toLocaleString('en-NG')}<br/>{reviewerLabel(resolution.reviewer)}{resolution.reviewer.email ? ` · ${resolution.reviewer.email}` : ''}{resolution.metaInvestigated ? ' · Meta brief used' : ' · Human review without Meta'}</small></article>)}</div>}
+        {data.manualResolutions.length > 0 && <div className="resolution-history"><h3>Commented resolutions in this review</h3>{data.manualResolutions.slice().reverse().map(resolution => <article key={resolution.id}><div><span className="resolution-kind">{resolution.kind}</span><strong>{resolution.recordId}{resolution.kind === 'stock' ? ` · variance ${resolution.varianceQty ?? 0}` : ` · ${money(resolution.amountKobo)}`}</strong><p>{resolution.comment}</p></div><small>{new Date(resolution.reviewedAt).toLocaleString('en-NG')}<br/>{reviewerLabel(resolution.reviewer)}{resolution.reviewer.email ? ` · ${resolution.reviewer.email}` : ''}{resolution.metaInvestigated ? ' · Meta brief used' : ' · Human review without Meta'}<br/><button className="link-button" disabled={!!busy} onClick={() => void reopenDecision({ type: 'resolution', resolutionId: resolution.id })}>Reopen decision</button></small></article>)}</div>}
         {data.reviewHistory.length > 0 && <div className="review-history"><h3>Completed review history</h3><div>{data.reviewHistory.slice().reverse().map(review => <article key={review.id}><small>{new Date(review.completedAt).toLocaleString('en-NG')}{review.completedBy ? ` · ${reviewerLabel(review.completedBy)}` : ''}</small><strong>{review.title}</strong><p>{review.counts.invoices} invoices · {review.counts.cashbook} cash entries · {review.counts.bank} bank rows · {review.counts.stock} stock items</p><div><span>{money(review.totals.reconciledKobo ?? (review.totals.approvedInvoiceKobo + review.totals.bankedCashKobo))} reconciled value</span><span>{review.results.manualResolutions || 0} commented resolutions · {review.results.stockVarianceItems} stock variances</span></div>{Boolean(review.manualResolutions?.length) && <details><summary>View signed resolution trail</summary>{review.manualResolutions!.map(resolution => <section key={resolution.id}><b>{resolution.kind} · {resolution.recordId}</b><p>{resolution.comment}</p><small>{new Date(resolution.reviewedAt).toLocaleString('en-NG')} · {reviewerLabel(resolution.reviewer)}{resolution.reviewer.email ? ` · ${resolution.reviewer.email}` : ''}</small></section>)}</details>}</article>)}</div></div>}
         <div className="activity">{data.audit.slice(-8).reverse().map((event, index) => <div key={`${event.at}-${index}`}><span className="activity-dot"/><section><strong>{activityText(event)}</strong>{event.comment && <p>“{event.comment}”</p>}<small>{event.actor ? `${reviewerLabel(event.actor)}${event.actor.email ? ` · ${event.actor.email}` : ''}` : event.by || 'System'}</small></section><time>{new Date(event.at).toLocaleString('en-NG')}</time></div>)}{data.audit.length === 0 && <p className="empty">Your review activity will appear here.</p>}</div>
       </section>
