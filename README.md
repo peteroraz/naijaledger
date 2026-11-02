@@ -1,6 +1,26 @@
 # NaijaLedger
 
-**A source-backed reconciliation copilot for Nigerian SMEs.** Built for the Meta Global AI Developer Hackathon's “Build for Your World” theme. A business owner can capture handwritten daybooks, scanned invoices, PDFs, Word files, voice notes, typed entries, or CSV exports; review deterministic match suggestions; and investigate missing settlements with Meta models. A human decides every import and allocation.
+**A source-backed reconciliation copilot for Nigerian SMEs.**
+
+| Submission | Details |
+| --- | --- |
+| Hackathon | Meta Global AI Developer Hackathon |
+| Track | Indie Developer |
+| Theme | Build for Your World |
+| Builder | Peter Orazulike |
+| Live app | [Open NaijaLedger](https://naijaledger-793831462989.europe-west1.run.app/) |
+| Source | [github.com/peteroraz/naijaledger](https://github.com/peteroraz/naijaledger) |
+| Event build window | 26 October–4 November 2026 |
+
+NaijaLedger is designed for owner-managed Nigerian retailers and bookkeepers whose sales evidence is split across notebooks, voice notes, invoices, spreadsheets and later bank lodgements. It turns those fragments into reviewable records and source-backed reconciliation proposals without allowing AI to approve money movement or tax treatment. A business owner can capture handwritten daybooks, scanned invoices, PDFs, Word files, voice notes, typed entries or CSV exports; review deterministic match suggestions; and investigate missing settlements with Meta models. A human decides every import, allocation and exception closure.
+
+## Meta AI in the product
+
+| Meta model | Real work performed | Human and deterministic controls |
+| --- | --- | --- |
+| **Muse Spark 1.3** | Extracts schema-constrained sales candidates from handwriting, scans and documents; produces cited Evidence Agent answers; creates unresolved-invoice briefs; performs an independent groundedness review. | Source fingerprints, citation and amount checks, bounded evidence, model receipts and explicit human review prevent automatic posting or settlement. |
+| **Muse Voice Transcribe 1.0** | Transcribes uploaded or recorded voice entries before Muse Spark extracts candidate records. | Audio is converted to safe 16 kHz WAV, time-bounded and never stored as raw bytes. A person edits and commits the extracted candidate. |
+| **Deterministic application logic** | Retrieves source-addressable evidence, proposes exact unambiguous matches, calculates cash batches and stock variances, and validates model claims. | This is auditable code, not a third-party model. No closed third-party AI service or non-Meta model is called at runtime. |
 
 ## Judge Demo — no credentials required
 
@@ -9,7 +29,7 @@ Open the [hosted NaijaLedger app](https://naijaledger-793831462989.europe-west1.
 Recommended five-minute path:
 
 1. Review the seeded invoices, handwritten-style cashbook entries, bank credits, stock count, and visible demo allowances.
-2. In **Meta Smart Intake**, paste `29 October 2026 — cash sales to walk-in customers were ₦42,500, recorded in the daybook.`, select **Extract sales candidates**, confirm **Cash sale**, inspect the provenance, and commit the reviewed row.
+2. In **Meta Smart Intake**, upload the three-file judge pack together: [`samples/01_handwritten_cashbook.png`](samples/01_handwritten_cashbook.png), [`samples/02_sales_note.txt`](samples/02_sales_note.txt), and [`samples/03_voice_note.wav`](samples/03_voice_note.wav). Select **Extract sales candidates**, inspect the live Muse model labels and provenance, correct any uncertain fields, confirm invoice versus cash sale, and commit only the reviewed rows. [`samples/README.txt`](samples/README.txt) explains the expected records.
 3. Ask the **NaijaLedger Evidence Agent** why `INV-002` is unresolved. Inspect the records and policy chunks retrieved before Muse Spark's answer, the exact citations, and the independent verification receipt.
 4. Approve an invoice match, then open **Cash Lodgement Desk** and approve one exact daily or weekly cash batch only after reading the teller/deposit-slip checkpoint.
 5. In **Stock Reconciliation**, change a physical count and observe the live shortage/surplus, then save it. Investigate **INV-002** in **Meta Evidence Lab** and inspect its cited brief.
@@ -59,7 +79,7 @@ Smart Intake supports up to six files, 10 MB per file and 28 MB combined (30 MB 
 
 Files are processed only after the signed-in user clicks **Extract sales candidates**. Raw bytes are held in memory for that request and are not written to Firestore. Firestore retains the bounded draft, short transcript/text preview when applicable, extracted fields, source fingerprints, and audit history. Document content is treated as untrusted data, so instructions inside a document cannot override the extraction policy. A document extraction never becomes an invoice or cashbook row without the human commit checkpoint.
 
-Judge Demo uses the same verified backend and per-UID Firestore isolation as a normal workspace. Model allowances are consumed in Firestore transactions and survive sample resets. A separate hourly in-memory limit by trusted proxy address bounds public demo model traffic. These controls are for a hackathon demonstration, not a general-purpose public multi-tenant billing system.
+Judge Demo uses the same verified backend and per-UID Firestore isolation as a normal workspace. Model allowances are consumed in Firestore transactions and survive sample resets. A separate hourly in-memory limit per running Cloud Run instance, keyed by trusted proxy address, bounds public demo model traffic. These controls are for a hackathon demonstration, not a general-purpose public multi-tenant billing system.
 
 ## Architecture
 
@@ -67,18 +87,18 @@ Judge Demo uses the same verified backend and per-UID Firestore isolation as a n
 
 The Express server alone calls Meta Model API. Firestore rules deny all browser reads and writes, every workspace is addressed by the verified Firebase UID, and the server checks token revocation as well as signature/expiry. Security headers deny framing and unnecessary browser capabilities. The workspace is stored as checksummed compressed chunks containing normalized source rows, an optional extraction draft, decisions, briefs, Evidence Agent answers, source hashes, version, and a bounded audit log. Smart Intake uses Muse Spark 1.3 for images, PDFs and structured text, `mammoth` for local DOCX text extraction, and Muse Voice Transcribe for speech. The model receives only the small evidence set selected by deterministic retrieval. No closed third-party AI service or non-Meta model is called at runtime.
 
-## Remaining work before production or judging
+## Production roadmap beyond the hackathon
 
-- Run the live workflow with a second Google account to document workspace isolation as part of the final test evidence.
-- Capture the production verification receipt, human sign-off, persistence after reload, and exported review pack in the final demo.
-- Add partial/split settlement allocations, POS fee evidence, finer role permissions, optional encrypted raw-evidence storage, and retention/deletion controls. Current exact matching intentionally leaves these cases unresolved.
-- Test with realistic **synthetic** scenarios and record a concise demo showing ambiguity, human review, persistent reload, and the cited Meta brief.
+- Add partial and split-settlement allocations with explicit fee, withholding and remittance evidence. Current exact matching intentionally leaves ambiguous cases unresolved.
+- Add organisation roles, approval thresholds, encrypted raw-evidence retention controls and configurable deletion policies for production teams.
+- Move the public demo traffic limiter to a shared store for multi-instance enforcement; the current per-instance limiter is appropriate only for the bounded hackathon demo.
+- Expand the synthetic benchmark suite across more Nigerian SME sectors and statement formats while retaining human approval and source-level provenance.
 
-References: [Firebase ID token verification](https://firebase.google.com/docs/auth/admin/verify-id-tokens), [Firestore transactions](https://firebase.google.com/docs/firestore/manage-data/transactions), [Meta structured output](https://dev.meta.ai/docs/cookbook/structured-output), [hackathon page](https://events.cerebralvalley.ai/e/meta-ai-developer-hackathon).
+References: [Firebase ID token verification](https://firebase.google.com/docs/auth/admin/verify-id-tokens), [Firestore transactions](https://firebase.google.com/docs/firestore/manage-data/transactions), [Meta structured output](https://dev.meta.ai/docs/cookbook/structured-output), [hackathon details](https://cerebralvalley.ai/e/meta-ai-developer-hackathon/details).
 
 ## Cloud deployment (Google Cloud Run)
 
-Cloud Run serves the React build and authenticated API from one HTTPS origin. It uses the existing Firestore database in `europe-west1`. Its runtime service account gets `roles/datastore.user`; no downloaded Firebase private key is needed. The backend serves public Firebase Web configuration at runtime. The deploy script prompts for the public Web API key; private server credentials are never sent to the browser.
+Cloud Run serves the React build and authenticated API from one HTTPS origin. It uses the existing Firestore database in `europe-west1`. Its runtime service account gets `roles/datastore.user` for workspace persistence and `roles/firebaseauth.viewer` so the Admin SDK can verify Firebase users and token revocation; no downloaded Firebase private key is needed. The backend serves public Firebase Web configuration at runtime. The deploy script prompts for the public Web API key; private server credentials are never sent to the browser.
 
 1. Link a Cloud Billing account to `naijaledger-ed044` (Firebase Spark becomes Blaze). Cloud Run has free usage allowances, but this is a metered deployment. Maximum instances is set to two; this is not a spending cap.
 2. Open Google Cloud Shell and run:
