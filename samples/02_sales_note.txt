@@ -1,0 +1,16 @@
+OKAFOR MINI MART — SALES NOTE
+Date: 21 October 2026
+
+Invoice INV-007
+Customer: Ngozi Restaurant
+Goods supplied: rice and cooking oil
+Total amount: NGN 72,000.00
+Payment status: not yet confirmed
+
+Cash sale CASH-009
+Customer: Walk-in customer
+Description: household provisions sold over the counter
+Amount received in cash: NGN 14,500.00
+
+Entered by: A. Okafor
+
