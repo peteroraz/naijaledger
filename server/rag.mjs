@@ -184,15 +184,37 @@ function lexicalRetrieve(chunks, question, limit = 14) {
 }
 
 function selectEvidence(chunks, lexical, limit = 10) {
-  const selected = lexical.slice(0, limit).map((chunk, index) => ({
+  const ranked = [...lexical];
+  const referencedInvoices = lexical.filter(chunk => chunk.type === 'invoice').slice(0, 2);
+  for (const invoice of referencedInvoices) {
+    const customerTokens = tokens(invoice.customer || '').filter(token => token.length >= 3);
+    const candidates = chunks.filter(chunk => chunk.type === 'bank' && Number(chunk.amountKobo) > 0).map(chunk => {
+      const amountGap = Math.abs(Number(chunk.amountKobo) - Number(invoice.amountKobo));
+      const dateGap = invoice.date && chunk.date ? Math.abs(Date.parse(chunk.date) - Date.parse(invoice.date)) / 86_400_000 : 999;
+      const nameOverlap = customerTokens.filter(token => tokens(chunk.title).includes(token)).length;
+      return { chunk, amountGap, dateGap, nameOverlap };
+    }).filter(item => item.nameOverlap > 0 || item.amountGap <= Math.max(200_000, Math.abs(Number(invoice.amountKobo)) * 0.1))
+      .sort((a, b) => b.nameOverlap - a.nameOverlap || a.amountGap - b.amountGap || a.dateGap - b.dateGap || a.chunk.id.localeCompare(b.chunk.id)).slice(0, 3);
+    for (const { chunk, amountGap, dateGap, nameOverlap } of candidates) {
+      if (!ranked.some(item => item.id === chunk.id)) ranked.push({
+        ...chunk,
+        lexicalScore: Math.max(1, 12 - Math.min(8, amountGap / 100_000) - Math.min(3, dateGap / 14)),
+        retrievalReason: `linked to ${invoice.ref}: ${nameOverlap ? 'customer wording · ' : ''}amount gap ${moneyText(amountGap)} · ${Math.round(dateGap)} day(s)`,
+      });
+    }
+  }
+  ranked.sort((a, b) => b.lexicalScore - a.lexicalScore || a.id.localeCompare(b.id));
+  const selected = [];
+  const add = chunk => { if (chunk && !selected.some(item => item.id === chunk.id) && selected.length < limit) selected.push(chunk); };
+  referencedInvoices.forEach(add);
+  if (referencedInvoices.length) ranked.filter(chunk => chunk.type === 'bank').slice(0, 3).forEach(add);
+  ranked.filter(chunk => chunk.type !== 'policy').forEach(chunk => { if (selected.length < limit - 1) add(chunk); });
+  add(ranked.find(chunk => chunk.type === 'policy') || chunks.find(chunk => chunk.id === 'policy:KB-072'));
+  ranked.filter(chunk => chunk.type !== 'policy').forEach(add);
+  return selected.slice(0, limit).map((chunk, index) => ({
     ...chunk,
     retrievalScore: Number((1 / (20 + index)).toFixed(5)),
   }));
-  if (!selected.some(chunk => chunk.type === 'policy')) {
-    const policy = lexical.find(chunk => chunk.type === 'policy') || chunks.find(chunk => chunk.id === 'policy:KB-072');
-    if (policy) selected.splice(Math.max(0, limit - 1), 1, { ...policy, retrievalScore: 0, retrievalReason: policy.retrievalReason || 'answer policy' });
-  }
-  return selected;
 }
 
 async function requestJson({ apiKey, fetcher, messages, responseFormat, maxTokens, purpose }) {
@@ -211,7 +233,13 @@ async function requestJson({ apiKey, fetcher, messages, responseFormat, maxToken
 }
 
 const answerText = value => [value.finding, ...(value.evidence || []).map(item => item.statement), value.calculation, ...(value.missingEvidence || []), value.nextCheck, value.decisionBoundary].join('\n');
-const unsafeClaims = text => /\b(?:automatically|definitely|confirmed)\s+(?:approve|approved|settled|paid|reconciled)\b|\btax[- ]deductible\b/i.test(text);
+const currencyAmounts = value => [...clean(value, 5_000).matchAll(/(?:₦|NGN\s*)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/gi)]
+  .map(match => Math.round(Number(match[1].replaceAll(',', '')) * 100)).filter(Number.isFinite);
+const unsafeClaims = value => value.split(/(?<=[.!?])\s+/).some(sentence => {
+  if (/\b(?:do not|don't|never|cannot|must not|requires? human|human review)\b/i.test(sentence)) return false;
+  return /\b(?:approve|approved|write[- ]?off|written off|settled|paid|reconciled|post(?:ed)?|classif(?:y|ied)|tax[- ]deductible|tax treatment)\b/i.test(sentence)
+    && /\b(?:automatically|definitely|confirmed|should|is|was|has been|can be|proceed|therefore)\b/i.test(sentence);
+});
 
 async function generateAnswer(question, selected, sourceFingerprint, { apiKey, fetcher }) {
   const raw = await requestJson({
@@ -238,10 +266,22 @@ async function generateAnswer(question, selected, sourceFingerprint, { apiKey, f
     nextCheck: clean(raw.nextCheck, 400), decisionBoundary: clean(raw.decisionBoundary, 300),
     model: MODEL, createdAt: new Date().toISOString(), sourceFingerprint,
   };
+  const sourceAmounts = selected.map(chunk => Math.abs(Number(chunk.amountKobo))).filter(Number.isFinite).filter(value => value > 0);
+  const allowedAmounts = new Set(sourceAmounts);
+  for (let left = 0; left < sourceAmounts.length; left += 1) {
+    for (let right = left + 1; right < sourceAmounts.length; right += 1) {
+      allowedAmounts.add(Math.abs(sourceAmounts[left] - sourceAmounts[right]));
+      allowedAmounts.add(sourceAmounts[left] + sourceAmounts[right]);
+    }
+  }
+  const unsupportedAmounts = [...new Set(currencyAmounts(answerText(answer)).filter(value => !allowedAmounts.has(value)))];
+  const materialClaimCitations = evidence.length > 0 && (!answer.finding || evidence.some(item => item.statement));
   const checks = [
     { id: 'retrieval', label: 'Retrieved context', passed: selected.length > 0, detail: `${selected.length} evidence chunks supplied to Muse Spark.` },
     { id: 'source', label: 'Source fingerprint', passed: /^[a-f0-9]{64}$/.test(sourceFingerprint), detail: `Bound to ${sourceFingerprint.slice(0, 16)}…` },
     { id: 'citations', label: 'Citation integrity', passed: evidence.length > 0 && invalidIds.length === 0, detail: invalidIds.length ? `Unknown citations blocked: ${[...new Set(invalidIds)].join(', ')}` : `${evidence.length} cited sources checked.` },
+    { id: 'claim-coverage', label: 'Material claim coverage', passed: materialClaimCitations, detail: materialClaimCitations ? 'The finding is accompanied by source-addressable evidence.' : 'The finding has no source-addressable evidence statement.' },
+    { id: 'amounts', label: 'Amount integrity', passed: unsupportedAmounts.length === 0, detail: unsupportedAmounts.length ? `${unsupportedAmounts.length} unsupported currency value(s) were blocked.` : 'Currency values match a retrieved source value or a two-source sum/difference.' },
     { id: 'policy', label: 'Decision boundary', passed: !unsafeClaims(answerText(answer)), detail: unsafeClaims(answerText(answer)) ? 'An automatic decision claim was blocked.' : 'No automatic settlement, adjustment, or tax conclusion.' },
   ];
   const deterministicPassed = checks.every(check => check.passed);

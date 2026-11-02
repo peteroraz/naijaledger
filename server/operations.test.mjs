@@ -33,11 +33,14 @@ test('stock reconciliation calculates expected count and signed variance', () =>
   assert.equal(result.items.find(row => row.sku === 'SOAP-CTN').status, 'surplus');
 });
 
-test('completed review snapshot keeps decision totals without copying raw source rows', () => {
+test('completed review snapshot keeps reconstructable source rows and decision evidence', () => {
   const state = seedWorkspace();
   state.approved = [{ invoiceId: 'INV-001', bankId: 'BNK-001' }];
   state.cashAllocations = [{ cashEntryIds: ['CASH-001', 'CASH-002'], bankId: 'BNK-008' }];
-  state.manualResolutions = [{ kind: 'invoice', recordId: 'INV-002', amountKobo: 8_000_000, comment: 'Reviewed', reviewedAt: '2026-10-30T09:00:00.000Z', reviewer: { uid: 'alice', displayName: 'Alice Reviewer' } }];
+  state.manualResolutions = [
+    { kind: 'invoice', recordId: 'INV-002', amountKobo: 8_000_000, comment: 'Reviewed', reviewedAt: '2026-10-30T09:00:00.000Z', reviewer: { uid: 'alice', displayName: 'Alice Reviewer' } },
+    { kind: 'cash', recordId: 'CASH-003', amountKobo: 2_800_000, comment: 'Cash retained in till', reviewedAt: '2026-10-30T09:05:00.000Z', reviewer: { uid: 'alice', displayName: 'Alice Reviewer' } },
+  ];
   state.audit = [{ action: 'exception-resolved', invoiceId: 'INV-002', at: '2026-10-30T09:00:00.000Z' }];
   const snapshot = reviewCycleSnapshot(state, 'October close', '2026-10-30T10:00:00.000Z', { uid: 'alice', displayName: 'Alice Reviewer' });
   assert.equal(snapshot.counts.cashbook, 5);
@@ -45,9 +48,14 @@ test('completed review snapshot keeps decision totals without copying raw source
   assert.equal(snapshot.totals.bankedCashKobo, 6_300_000);
   assert.equal(snapshot.totals.reconciledKobo, 18_300_000);
   assert.equal(snapshot.totals.manualReviewedInvoiceKobo, 8_000_000);
-  assert.equal(snapshot.results.manualResolutions, 1);
+  assert.equal(snapshot.totals.manualReviewedCashKobo, 2_800_000);
+  assert.equal(snapshot.totals.ledgerReviewedKobo, 29_100_000);
+  assert.equal(snapshot.results.manualResolutions, 2);
   assert.equal(snapshot.manualResolutions[0].comment, 'Reviewed');
   assert.equal(snapshot.audit[0].action, 'exception-resolved');
   assert.equal(snapshot.completedBy.displayName, 'Alice Reviewer');
-  assert.equal('bank' in snapshot, false);
+  assert.equal(snapshot.bank.length, state.bank.length);
+  assert.equal(snapshot.invoices.length, state.invoices.length);
+  assert.equal(snapshot.approved[0].invoiceId, 'INV-001');
+  assert.equal(snapshot.cashAllocations[0].bankId, 'BNK-008');
 });

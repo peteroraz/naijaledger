@@ -14,15 +14,48 @@ function fakeFirestore() {
     path,
   });
   return {
+    _docs: docs,
     collection: name => ref(name),
     runTransaction: async fn => {
       const pending = [];
-      const result = await fn({ get: doc => doc.get(), set: (doc, value) => pending.push([doc.path, structuredClone(value)]) });
-      pending.forEach(([path, value]) => docs.set(path, value));
+      const result = await fn({ get: doc => doc.get(), set: (doc, value) => pending.push(['set', doc.path, structuredClone(value)]), delete: doc => pending.push(['delete', doc.path]) });
+      pending.forEach(([operation, path, value]) => operation === 'delete' ? docs.delete(path) : docs.set(path, value));
       return result;
     },
   };
 }
+
+test('normal sign-in starts clean while Judge Demo starts with synthetic records and security headers', async () => {
+  const store = createFirestoreStore(fakeFirestore());
+  const { server, url } = await serve(store, async () => { throw new Error('Model not used'); });
+  try {
+    const normal = await fetch(`${url}/api/workspace`, { headers: { Authorization: 'Bearer alice' } });
+    const normalData = await normal.json();
+    assert.equal(normalData.invoices.length, 0);
+    assert.equal(normalData.bank.length, 0);
+    assert.equal(normal.headers.get('x-frame-options'), 'DENY');
+    assert.equal(normal.headers.get('x-content-type-options'), 'nosniff');
+    assert.match(normal.headers.get('content-security-policy'), /frame-ancestors 'none'/);
+    const judge = await (await fetch(`${url}/api/workspace`, { headers: { Authorization: 'Bearer judge' } })).json();
+    assert.equal(judge.invoices.length, 6);
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});
+
+test('segmented Firestore persistence stores workspace payload outside the metadata document', async () => {
+  const db = fakeFirestore();
+  const store = createFirestoreStore(db);
+  const original = await store.get('alice', true);
+  await store.change('alice', original.version, state => {
+    state.audit = Array.from({ length: 250 }, (_, index) => ({ action: 'test-event', at: '2026-11-02T00:00:00.000Z', detail: `event-${index}-${String(index).padStart(4, '0')}` }));
+    return state;
+  });
+  const root = db._docs.get('users/alice/workspaces/default');
+  assert.equal(root.storageVersion, 2);
+  assert.ok(root.chunkCount >= 1);
+  assert.equal('invoices' in root, false);
+  assert.ok(db._docs.has('users/alice/workspaces/default/chunks/0000'));
+  assert.equal((await store.get('alice', false)).audit.length, 250);
+});
 
 async function serve(store, investigate, extractIntake, ragAgent) {
   const app = createApp({ store, investigate, ...(extractIntake ? { extractIntake } : {}), ...(ragAgent ? { ragAgent } : {}), verifyToken: async token => {
@@ -89,6 +122,7 @@ test('Judge Demo is isolated, bounded, resettable, and cannot refresh model allo
 test('auth, user isolation, persistence across server restarts, and stale writes', async () => {
   const db = fakeFirestore();
   const store = createFirestoreStore(db);
+  await store.get('alice', true); await store.get('bob', true);
   let { server, url } = await serve(store, async () => { throw new Error('Model not used'); });
   const request = async (user, path, body) => {
     const response = await fetch(`${url}/api${path}`, {
@@ -122,8 +156,49 @@ test('auth, user isolation, persistence across server restarts, and stale writes
   } finally { await new Promise(resolve => server.close(resolve)); }
 });
 
+test('proposal rejection, reconsideration, approval undo, and audited source replacement are reversible', async () => {
+  const store = createFirestoreStore(fakeFirestore());
+  await store.get('alice', true);
+  const { server, url } = await serve(store, async () => { throw new Error('Model not used'); });
+  const request = async (path, body) => {
+    const response = await fetch(`${url}/api${path}`, { method: body ? 'POST' : 'GET', headers: { Authorization: 'Bearer alice', 'Content-Type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}) });
+    return { status: response.status, data: await response.json() };
+  };
+  try {
+    let workspace = (await request('/workspace')).data;
+    const proposal = workspace.proposals[0];
+    const rejected = await request('/proposals/reject', { kind: 'invoice', invoiceId: proposal.invoiceId, bankId: proposal.bankId, comment: 'Customer reference does not match the deposit evidence.', version: workspace.version });
+    assert.equal(rejected.status, 200, JSON.stringify(rejected.data));
+    workspace = rejected.data;
+    assert.equal(workspace.rejectedProposals.length, 1);
+    assert.ok(workspace.unresolvedInvoices.some(row => row.id === proposal.invoiceId));
+    const reopened = await request('/proposals/reopen', { rejectionId: workspace.rejectedProposals[0].id, comment: 'New remittance advice requires reconsideration.', version: workspace.version });
+    assert.equal(reopened.status, 200, JSON.stringify(reopened.data));
+    workspace = reopened.data;
+    assert.ok(workspace.proposals.some(row => row.invoiceId === proposal.invoiceId));
+    const approved = await request('/approvals', { invoiceId: proposal.invoiceId, bankId: proposal.bankId, version: workspace.version });
+    workspace = approved.data;
+    const undone = await request('/decisions/reopen', { type: 'invoice-match', invoiceId: proposal.invoiceId, bankId: proposal.bankId, comment: 'Approval was entered against the wrong supporting receipt.', version: workspace.version });
+    assert.equal(undone.status, 200, JSON.stringify(undone.data));
+    workspace = undone.data;
+    assert.ok(workspace.proposals.some(row => row.invoiceId === proposal.invoiceId));
+    const cashProposal = workspace.cashReview.proposals[0];
+    const cashRejected = await request('/proposals/reject', { kind: 'cash', bankId: cashProposal.bankId, cashEntryIds: cashProposal.cashEntryIds, comment: 'Deposit slip belongs to a different cashier batch.', version: workspace.version });
+    assert.equal(cashRejected.status, 200, JSON.stringify(cashRejected.data));
+    assert.equal(cashRejected.data.cashReview.unbankedCash.length, cashProposal.cashEntryIds.length);
+    assert.equal(cashRejected.data.closeBlockers.unbankedCash, cashProposal.cashEntryIds.length);
+    workspace = cashRejected.data;
+    const replaced = await request('/import/bank', { csv: 'id,date,description,amount\nNEW-001,2026-11-01,November opening credit,100.00', confirmReplace: true, reason: 'Corrected statement period supplied by the bank.', version: workspace.version });
+    assert.equal(replaced.status, 200, JSON.stringify(replaced.data));
+    assert.equal(replaced.data.bank[0].id, 'NEW-001');
+    assert.equal(replaced.data.audit.at(-1).action, 'source-replaced');
+    assert.equal(replaced.data.matches.length, 0);
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});
+
 test('multisource extraction stays draft-only until reviewed rows are committed', async () => {
   const store = createFirestoreStore(fakeFirestore());
+  await store.get('alice', true);
   const draft = {
     id: 'intake-test', createdAt: '2026-10-29T12:00:00.000Z', model: 'muse-spark-1.3', voiceModel: 'muse-voice-transcribe-1.0',
     sourceFingerprint: 'a'.repeat(64), status: 'awaiting_human_review',
@@ -170,6 +245,7 @@ test('multisource extraction stays draft-only until reviewed rows are committed'
 
 test('Evidence Agent answers are source-bound, persistent, reviewable, and isolated by user', async () => {
   const store = createFirestoreStore(fakeFirestore());
+  await store.get('alice', true); await store.get('bob', true);
   const createdAt = '2026-10-31T12:00:00.000Z';
   const fingerprint = 'c'.repeat(64);
   const ragAgent = {
@@ -308,6 +384,7 @@ test('human evidence-brief sign-off is versioned and retained in the audit trail
 
 test('cash lodgements, stock counts, and completed review history are versioned end to end', async () => {
   const store = createFirestoreStore(fakeFirestore());
+  await store.get('alice', true);
   const { server, url } = await serve(store, async () => { throw new Error('Model not used'); });
   const request = async (path, body) => {
     const response = await fetch(`${url}/api${path}`, {
@@ -320,9 +397,10 @@ test('cash lodgements, stock counts, and completed review history are versioned 
     const initial = (await request('/workspace')).data;
     assert.deepEqual(initial.cashReview.proposals.map(row => row.bankId), ['BNK-008', 'BNK-009']);
     assert.equal(initial.stockReview.summary.varianceItems, 2);
+    assert.equal(initial.closeBlockers.stockVariances, 2);
     const replacement = await request('/import/bank', { csv: 'id,date,description,amount\nNEW-001,2026-11-01,New period credit,100.00', version: initial.version });
     assert.equal(replacement.status, 409);
-    assert.match(replacement.data.error, /Complete the current review/);
+    assert.match(replacement.data.error, /Confirm replacement/);
 
     const cash = await request('/cash-deposits', { cashEntryIds: ['CASH-001', 'CASH-002'], bankId: 'BNK-008', version: initial.version });
     assert.equal(cash.status, 200, JSON.stringify(cash.data));
@@ -380,7 +458,7 @@ test('cash lodgements, stock counts, and completed review history are versioned 
     assert.equal(completed.data.reviewHistory[0].results.manualResolutions, workspace.manualResolutions.length);
     assert.equal(completed.data.reviewHistory[0].totals.reconciledKobo, workspace.totals.reconciledKobo);
     assert.equal(completed.data.reviewHistory[0].completedBy.email, 'alice@example.com');
-    assert.equal(completed.data.reviewHistory[0].audit.at(-1).action, 'exception-resolved');
+    assert.equal(completed.data.reviewHistory[0].audit.at(-1).action, 'review-cycle-completed');
     assert.equal(completed.data.invoices.length, 0);
     assert.equal(completed.data.bank.length, 0);
     assert.equal(completed.data.cashbook.length, 0);

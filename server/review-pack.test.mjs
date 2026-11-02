@@ -10,6 +10,11 @@ function reviewedState() {
   state.updatedAt = '2026-10-29T14:17:00.000Z';
   state.approved = [{ invoiceId: 'INV-001', bankId: 'BNK-001', reviewedAt: '2026-10-29T14:00:00.000Z', reviewedBy: 'test-user' }];
   state.cashAllocations = [{ cashEntryIds: ['CASH-001', 'CASH-002'], bankId: 'BNK-008', reviewedAt: '2026-10-29T14:02:00.000Z', reviewedBy: 'test-user', frequency: 'daily' }];
+  state.rejectedProposals = [{
+    id: 'rejection-test', key: 'invoice:INV-003:BNK-003', kind: 'invoice', invoiceId: 'INV-003', bankId: 'BNK-003', cashEntryIds: [],
+    amountKobo: 5_000_000, comment: 'Remittance reference names a different customer.', rejectedAt: '2026-10-29T14:05:00.000Z',
+    reviewer: { uid: 'test-user', displayName: 'Test Reviewer' },
+  }];
   state.manualResolutions = [{
     id: 'resolution-invoice-INV-002-20261029141700', kind: 'invoice', recordId: 'INV-002', amountKobo: 8000000,
     comment: 'POS fee statement explains the net settlement; retained for follow-up.', reviewedAt: '2026-10-29T14:17:00.000Z',
@@ -59,6 +64,7 @@ test('review pack PDF is a complete printable document', async () => {
   assert.ok(Buffer.isBuffer(file));
   assert.equal(file.subarray(0, 5).toString(), '%PDF-');
   assert.ok(file.length > 5000);
+  assert.match(file.toString('latin1'), /\/MediaBox \[0 0 841\.89 595\.28\]/);
 });
 
 test('review pack Excel workbook preserves source, review, verification, and audit tables', async () => {
@@ -70,14 +76,16 @@ test('review pack Excel workbook preserves source, review, verification, and aud
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(file);
   assert.deepEqual(workbook.worksheets.map(sheet => sheet.name), [
-    'Summary', 'Approved Matches', 'Unresolved Invoices', 'Unresolved Bank', 'Manual Resolutions', 'Sales Invoices',
-    'Bank Transactions', 'Cashbook', 'Cash Deposits', 'Stock Reconciliation', 'Review History',
+    'Summary', 'Approved Matches', 'Unresolved Invoices', 'Unresolved Bank', 'Manual Resolutions', 'Rejected Proposals',
+    'Sales Invoices', 'Bank Transactions', 'Cashbook', 'Cash Deposits', 'Stock Reconciliation', 'Review History', 'Archived Sources', 'Archived Decisions',
     'AI Briefs', 'Evidence Agent', 'Verification Checks', 'Audit Trail',
   ]);
   assert.equal(workbook.getWorksheet('Summary').getCell('A1').value, 'NaijaLedger review pack');
   assert.equal(workbook.getWorksheet('Approved Matches').getCell('A2').value, 'INV-001');
   assert.equal(workbook.getWorksheet('Manual Resolutions').getCell('D2').value, 'INV-002');
   assert.equal(workbook.getWorksheet('Manual Resolutions').getCell('H2').value, 'Test Reviewer');
+  assert.equal(workbook.getWorksheet('Rejected Proposals').getCell('A2').value, 'rejection-test');
+  assert.equal(workbook.getWorksheet('Rejected Proposals').getCell('G2').value, 'Remittance reference names a different customer.');
   assert.equal(workbook.getWorksheet('Cash Deposits').getCell('A2').value, 'Approved');
   assert.equal(workbook.getWorksheet('Stock Reconciliation').getCell('A2').value, 'RICE-50');
   assert.equal(workbook.getWorksheet('AI Briefs').getCell('A2').value, 'INV-002');

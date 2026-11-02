@@ -12,5 +12,6 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci
-      - run: npm test
-      - run: npm run build
+      - run: npm run check
+      - run: npm audit --omit=dev --audit-level=high
+      - run: bash -n deploy-cloud.sh connect-meta.sh
