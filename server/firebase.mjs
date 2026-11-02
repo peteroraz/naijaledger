@@ -10,7 +10,7 @@ export function firebaseServices() {
   const db = getFirestore();
   return {
     verifyToken: async token => {
-      const decoded = await getAuth().verifyIdToken(token);
+      const decoded = await getAuth().verifyIdToken(token, true);
       return {
         uid: decoded.uid,
         displayName: decoded.name || null,

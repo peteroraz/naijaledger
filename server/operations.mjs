@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 const sumKobo = rows => rows.reduce((total, row) => total + Number(row.amountKobo || 0), 0);
 
 function datePlusDays(value, days) {
@@ -14,14 +16,14 @@ function weekKey(value) {
   return date.toISOString().slice(0, 10);
 }
 
-export function reconcileCashbook(cashbook = [], bank = [], allocations = [], blockedBankIds = []) {
+export function reconcileCashbook(cashbook = [], bank = [], allocations = [], blockedBankIds = [], resolvedCashIds = []) {
   const entries = new Map(cashbook.map(row => [row.id, row]));
   const credits = new Map(bank.filter(row => row.amountKobo > 0).map(row => [row.id, row]));
-  const usedEntries = new Set();
+  const usedEntries = new Set(resolvedCashIds);
   const usedBank = new Set(blockedBankIds);
   const matches = [];
   for (const allocation of allocations) {
-    const selected = (allocation.cashEntryIds || []).map(id => entries.get(id));
+    const selected = (allocation.cashEntryIds || []).map(id => entries.get(id)).sort((a, b) => (a?.date || '').localeCompare(b?.date || '') || (a?.id || '').localeCompare(b?.id || ''));
     const credit = credits.get(allocation.bankId);
     if (!credit || selected.some(row => !row) || !selected.length) throw new Error('Cash allocation references missing source');
     if (usedBank.has(credit.id) || selected.some(row => usedEntries.has(row.id))) throw new Error('Cash source already allocated');
@@ -75,22 +77,25 @@ export function reconcileStock(rows = []) {
 }
 
 export function reviewCycleSnapshot(state, title, completedAt = new Date().toISOString(), completedBy = null) {
-  const cash = reconcileCashbook(state.cashbook || [], state.bank || [], state.cashAllocations || []);
+  const resolvedCashIds = (state.manualResolutions || []).filter(row => row.kind === 'cash').map(row => row.recordId);
+  const cash = reconcileCashbook(state.cashbook || [], state.bank || [], state.cashAllocations || [], [], resolvedCashIds);
   const stock = reconcileStock(state.stock || []);
   const manualResolutions = state.manualResolutions || [];
   const manualReviewedInvoiceKobo = manualResolutions.filter(row => row.kind === 'invoice').reduce((total, row) => total + Number(row.amountKobo || 0), 0);
   const manualReviewedBankKobo = manualResolutions.filter(row => row.kind === 'bank').reduce((total, row) => total + Number(row.amountKobo || 0), 0);
+  const manualReviewedCashKobo = manualResolutions.filter(row => row.kind === 'cash').reduce((total, row) => total + Number(row.amountKobo || 0), 0);
   const approvedInvoiceKobo = (state.approved || []).reduce((total, allocation) => total + Number(state.invoices.find(row => row.id === allocation.invoiceId)?.amountKobo || 0), 0);
   const reconciledKobo = approvedInvoiceKobo + cash.totals.bankedCashKobo;
+  const ledgerReviewedKobo = reconciledKobo + manualReviewedInvoiceKobo + manualReviewedCashKobo;
   return {
-    id: `review-${completedAt.replace(/\D/g, '').slice(0, 14)}`,
+    id: `review-${completedAt.replace(/\D/g, '').slice(0, 14)}-${randomUUID().slice(0, 8)}`,
     title, startedAt: state.reviewCycle?.startedAt || state.updatedAt, completedAt, completedBy,
     sourceHashes: { ...(state.imports || {}) },
     counts: { invoices: state.invoices.length, bank: state.bank.length, cashbook: (state.cashbook || []).length, stock: stock.items.length },
     totals: {
       invoicedKobo: sumKobo(state.invoices), bankCreditsKobo: sumKobo(state.bank.filter(row => row.amountKobo > 0)),
       approvedInvoiceKobo, cashSalesKobo: cash.totals.cashSalesKobo, bankedCashKobo: cash.totals.bankedCashKobo,
-      manualReviewedInvoiceKobo, manualReviewedBankKobo, reconciledKobo,
+      manualReviewedInvoiceKobo, manualReviewedBankKobo, manualReviewedCashKobo, reconciledKobo, ledgerReviewedKobo,
     },
     results: {
       approvedInvoiceMatches: (state.approved || []).length,
@@ -98,7 +103,17 @@ export function reviewCycleSnapshot(state, title, completedAt = new Date().toISO
       manualResolutions: manualResolutions.length,
       stockVarianceItems: stock.summary.varianceItems,
     },
+    invoices: structuredClone(state.invoices || []),
+    bank: structuredClone(state.bank || []),
+    cashbook: structuredClone(state.cashbook || []),
+    stock: structuredClone(state.stock || []),
+    approved: structuredClone(state.approved || []),
+    cashAllocations: structuredClone(state.cashAllocations || []),
+    rejectedProposals: structuredClone(state.rejectedProposals || []),
     manualResolutions: structuredClone(manualResolutions),
+    briefs: structuredClone(state.briefs || {}),
+    agentAnswers: structuredClone(state.agentAnswers || []),
+    stockReview: structuredClone(stock),
     audit: structuredClone(state.audit || []),
   };
 }

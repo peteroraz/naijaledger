@@ -23,17 +23,40 @@ const text = value => String(value ?? '')
   .replace(/[“”]/g, '"')
   .replace(/[‘’]/g, "'")
   .replace(/[^\x09\x0A\x0D\x20-\x7E]/g, '');
+const proposalKey = proposal => proposal.cashEntryIds
+  ? `cash:${proposal.bankId}:${proposal.cashEntryIds.join('+')}`
+  : `invoice:${proposal.invoiceId}:${proposal.bankId}`;
+const uniqueRows = rows => [...new Map(rows.map(row => [row.id, row])).values()];
 
 export function createReviewPack(state, generatedAt = new Date().toISOString()) {
   const cashAllocations = state.cashAllocations || [];
   const manualResolutions = state.manualResolutions || [];
   const resolvedInvoiceIds = manualResolutions.filter(row => row.kind === 'invoice').map(row => row.recordId);
   const resolvedBankIds = manualResolutions.filter(row => row.kind === 'bank').map(row => row.recordId);
-  const invoiceReview = reconcile(state.invoices, state.bank, state.approved || [], [...cashAllocations.map(row => row.bankId), ...resolvedBankIds], resolvedInvoiceIds);
-  const cashReview = reconcileCashbook(state.cashbook || [], state.bank, cashAllocations, [...invoiceReview.matches, ...invoiceReview.proposals].map(row => row.bankId).concat(resolvedBankIds));
+  const resolvedCashIds = manualResolutions.filter(row => row.kind === 'cash').map(row => row.recordId);
+  const rejected = new Set((state.rejectedProposals || []).map(row => row.key));
+  const rawInvoiceReview = reconcile(state.invoices, state.bank, state.approved || [], [...cashAllocations.map(row => row.bankId), ...resolvedBankIds], resolvedInvoiceIds);
+  const rejectedInvoiceProposals = rawInvoiceReview.proposals.filter(row => rejected.has(proposalKey(row)));
+  const invoiceReview = {
+    ...rawInvoiceReview,
+    proposals: rawInvoiceReview.proposals.filter(row => !rejected.has(proposalKey(row))),
+    unresolvedInvoices: uniqueRows([...rawInvoiceReview.unresolvedInvoices, ...rejectedInvoiceProposals.map(proposal => state.invoices.find(row => row.id === proposal.invoiceId)).filter(Boolean)]),
+    unresolvedBank: uniqueRows([...rawInvoiceReview.unresolvedBank, ...rejectedInvoiceProposals.map(proposal => state.bank.find(row => row.id === proposal.bankId)).filter(Boolean)]),
+  };
+  const rawCashReview = reconcileCashbook(state.cashbook || [], state.bank, cashAllocations, [...invoiceReview.matches, ...invoiceReview.proposals].map(row => row.bankId).concat(resolvedBankIds), resolvedCashIds);
+  const rejectedCashProposals = rawCashReview.proposals.filter(row => rejected.has(proposalKey(row)));
+  const cashReview = {
+    ...rawCashReview,
+    proposals: rawCashReview.proposals.filter(row => !rejected.has(proposalKey(row))),
+    unbankedCash: uniqueRows([
+      ...rawCashReview.unbankedCash,
+      ...rejectedCashProposals.flatMap(proposal => proposal.cashEntryIds.map(id => (state.cashbook || []).find(row => row.id === id))).filter(Boolean),
+    ]),
+  };
   const cashBankIds = new Set([...cashReview.matches, ...cashReview.proposals].map(row => row.bankId));
   const manualReviewedInvoiceKobo = manualResolutions.filter(row => row.kind === 'invoice').reduce((total, row) => total + Number(row.amountKobo || 0), 0);
   const manualReviewedBankKobo = manualResolutions.filter(row => row.kind === 'bank').reduce((total, row) => total + Number(row.amountKobo || 0), 0);
+  const manualReviewedCashKobo = manualResolutions.filter(row => row.kind === 'cash').reduce((total, row) => total + Number(row.amountKobo || 0), 0);
   const reviewHistory = state.reviewHistory || [];
   const allManualResolutions = [
     ...reviewHistory.flatMap(review => (review.manualResolutions || []).map(row => ({ ...row, reviewId: review.id, reviewTitle: review.title }))),
@@ -47,8 +70,10 @@ export function createReviewPack(state, generatedAt = new Date().toISOString()) 
     ...invoiceReview.totals,
     manualReviewedInvoiceKobo,
     manualReviewedBankKobo,
-    manualReviewedKobo: manualReviewedInvoiceKobo + manualReviewedBankKobo,
+    manualReviewedCashKobo,
+    manualReviewedKobo: manualReviewedInvoiceKobo + manualReviewedBankKobo + manualReviewedCashKobo,
     reconciledKobo: invoiceReview.totals.approvedKobo + cashReview.totals.bankedCashKobo,
+    ledgerReviewedKobo: invoiceReview.totals.approvedKobo + cashReview.totals.bankedCashKobo + manualReviewedInvoiceKobo + manualReviewedCashKobo,
   };
   return {
     title: 'NaijaLedger review pack',
@@ -62,6 +87,7 @@ export function createReviewPack(state, generatedAt = new Date().toISOString()) 
     bank: state.bank,
     approved: state.approved || [],
     cashbook: state.cashbook || [], cashAllocations, cashReview, manualResolutions: allManualResolutions,
+    rejectedProposals: state.rejectedProposals || [],
     stockReview: reconcileStock(state.stock || []),
     reviewCycle: state.reviewCycle || null, reviewHistory,
     briefs: state.briefs || {}, agentAnswers: state.agentAnswers || [],
@@ -73,7 +99,7 @@ export function createReviewPack(state, generatedAt = new Date().toISOString()) 
 function styleWorksheet(sheet, widths = {}) {
   sheet.views = [{ state: 'frozen', ySplit: 1, showGridLines: false }];
   sheet.pageSetup = {
-    orientation: 'landscape', paperSize: 9, fitToPage: true, fitToWidth: 1, fitToHeight: 0,
+    orientation: 'landscape', paperSize: 9, fitToPage: true, fitToWidth: 2, fitToHeight: 0,
     printTitlesRow: '1:1', margins: { left: 0.25, right: 0.25, top: 0.5, bottom: 0.5, header: 0.2, footer: 0.2 },
   };
   sheet.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: sheet.columnCount } };
@@ -138,6 +164,7 @@ export async function buildReviewWorkbook(report) {
     ['Unresolved invoices', report.unresolvedInvoices.length, 'Unresolved bank entries', report.unresolvedBank.length],
     ['Invoiced total', amount(report.totals.invoicedKobo), 'Bank credit total', amount(report.totals.bankCreditsKobo)],
     ['Approved invoice total', amount(report.totals.approvedKobo), 'Reconciled value', amount(report.totals.reconciledKobo)],
+    ['Ledger-reviewed sales', amount(report.totals.ledgerReviewedKobo), 'Manually reviewed cash', amount(report.totals.manualReviewedCashKobo)],
     ['Comment-resolved invoices', amount(report.totals.manualReviewedInvoiceKobo), 'Comment-resolved bank entries', amount(report.totals.manualReviewedBankKobo)],
     ['Cashbook total', amount(report.cashReview.totals.cashSalesKobo), 'Approved cash lodgements', report.cashReview.matches.length],
     ['Stock items', report.stockReview.summary.totalItems, 'Stock variances', report.stockReview.summary.varianceItems],
@@ -150,12 +177,12 @@ export async function buildReviewWorkbook(report) {
     cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: `FF${GREEN}` } };
     cell.font = { name: 'Arial', size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
   });
-  for (let row = 5; row <= 14; row += 1) {
+  for (let row = 5; row <= 15; row += 1) {
     summary.getRow(row).font = { name: 'Arial', size: 10, color: { argb: `FF${TEXT}` } };
     summary.getCell(`A${row}`).font = { name: 'Arial', size: 10, bold: true, color: { argb: `FF${MUTED}` } };
     summary.getCell(`C${row}`).font = { name: 'Arial', size: 10, bold: true, color: { argb: `FF${MUTED}` } };
   }
-  ['B9', 'D9', 'B10', 'D10', 'B11', 'D11', 'B12'].forEach(ref => { summary.getCell(ref).numFmt = MONEY_FORMAT; });
+  ['B9', 'D9', 'B10', 'D10', 'B11', 'D11', 'B12', 'D12', 'B13'].forEach(ref => { summary.getCell(ref).numFmt = MONEY_FORMAT; });
   ['B5', 'B6'].forEach(ref => { summary.getCell(ref).numFmt = 'yyyy-mm-dd hh:mm'; });
   summary.addRow([]);
   const hashHeading = summary.addRow(['Source fingerprints']);
@@ -221,6 +248,12 @@ export async function buildReviewWorkbook(report) {
     metaInvestigated: row.metaInvestigated ? 'Yes' : 'No',
   })), { A: 28, B: 36, C: 14, D: 16, E: 18, F: 68, G: 21, H: 26, I: 32, J: 30, K: 16, L: 68 });
   resolutions.getColumn('F').alignment = { vertical: 'top', wrapText: true };
+  addRowsSheet(workbook, 'Rejected Proposals', [
+    { header: 'Rejection ID', key: 'id' }, { header: 'Type', key: 'kind' }, { header: 'Invoice ID', key: 'invoiceId' },
+    { header: 'Bank ID', key: 'bankId' }, { header: 'Cash entry IDs', key: 'cashEntryIds' },
+    { header: 'Amount (NGN)', key: 'amount', style: { numFmt: MONEY_FORMAT } }, { header: 'Reason', key: 'comment' },
+    { header: 'Rejected at', key: 'rejectedAt', style: { numFmt: 'yyyy-mm-dd hh:mm' } }, { header: 'Reviewer', key: 'reviewer' },
+  ], report.rejectedProposals.map(row => ({ ...row, cashEntryIds: (row.cashEntryIds || []).join(', '), amount: amount(row.amountKobo), rejectedAt: dateValue(row.rejectedAt), reviewer: row.reviewer?.displayName || row.reviewer?.email || row.reviewer?.uid || '' })), { A: 38, B: 14, C: 16, D: 16, E: 38, F: 18, G: 60, H: 21, I: 28 });
   addRowsSheet(workbook, 'Sales Invoices', invoiceColumns, invoiceRows(report.invoices), { A: 15, B: 15, C: 32, D: 18, E: 13, F: 30, G: 15, H: 20, I: 20, J: 68, K: 24 });
   addRowsSheet(workbook, 'Bank Transactions', sourceColumns('Description', 'description'), bankRows(report.bank), { A: 15, B: 15, C: 48, D: 18, E: 13 });
   addRowsSheet(workbook, 'Cashbook', [
@@ -248,6 +281,31 @@ export async function buildReviewWorkbook(report) {
     { header: 'Reconciled value (NGN)', key: 'settlement', style: { numFmt: MONEY_FORMAT } }, { header: 'Manual resolutions', key: 'manualResolutions' },
     { header: 'Stock variances', key: 'stockVariances' }, { header: 'Completed by', key: 'completedBy' },
   ], report.reviewHistory.map(row => ({ ...row, startedAt: dateValue(row.startedAt), completedAt: dateValue(row.completedAt), ...row.counts, settlement: amount(row.totals.reconciledKobo ?? (row.totals.approvedInvoiceKobo + row.totals.bankedCashKobo)), manualResolutions: row.results.manualResolutions || 0, stockVariances: row.results.stockVarianceItems, completedBy: row.completedBy?.displayName || row.completedBy?.email || row.completedBy?.uid || '' })), { A: 22, B: 28, C: 21, D: 21, E: 11, F: 13, G: 11, H: 12, I: 24, J: 18, K: 16, L: 28 });
+
+  const archivedSources = report.reviewHistory.flatMap(review => [
+    ...(review.invoices || []).map(row => ({ review: review.title, type: 'invoice', id: row.id, date: row.date, party: row.customer, description: row.description || '', amount: amount(row.amountKobo), detail: '', sourceRow: row.sourceRow, sourceHash: row.sourceHash || review.sourceHashes?.invoices || '' })),
+    ...(review.bank || []).map(row => ({ review: review.title, type: 'bank', id: row.id, date: row.date, party: '', description: row.description, amount: amount(row.amountKobo), detail: '', sourceRow: row.sourceRow, sourceHash: review.sourceHashes?.bank || '' })),
+    ...(review.cashbook || []).map(row => ({ review: review.title, type: 'cashbook', id: row.id, date: row.date, party: row.customer || '', description: row.description || '', amount: amount(row.amountKobo), detail: '', sourceRow: row.sourceRow, sourceHash: row.sourceHash || review.sourceHashes?.cashbook || '' })),
+    ...(review.stock || []).map(row => ({ review: review.title, type: 'stock', id: row.sku, date: '', party: row.item, description: row.unit, amount: null, detail: `opening ${row.openingQty}; received ${row.receivedQty}; sold ${row.soldQty}; adjustment ${row.adjustmentQty}; counted ${row.countedQty}`, sourceRow: row.sourceRow, sourceHash: review.sourceHashes?.stock || '' })),
+  ]);
+  addRowsSheet(workbook, 'Archived Sources', [
+    { header: 'Review period', key: 'review' }, { header: 'Source type', key: 'type' }, { header: 'Record ID', key: 'id' },
+    { header: 'Date', key: 'date' }, { header: 'Customer / item', key: 'party' }, { header: 'Description / unit', key: 'description' },
+    { header: 'Amount (NGN)', key: 'amount', style: { numFmt: MONEY_FORMAT } }, { header: 'Stock detail', key: 'detail' },
+    { header: 'Source row', key: 'sourceRow' }, { header: 'Source SHA-256', key: 'sourceHash' },
+  ], archivedSources, { A: 28, B: 15, C: 18, D: 15, E: 30, F: 38, G: 18, H: 70, I: 12, J: 68 });
+
+  const archivedDecisions = report.reviewHistory.flatMap(review => [
+    ...(review.approved || []).map(row => ({ review: review.title, type: 'invoice match', record: row.invoiceId, bankId: row.bankId, detail: '', at: row.reviewedAt, reviewer: row.reviewer?.displayName || row.reviewedBy || '' })),
+    ...(review.cashAllocations || []).map(row => ({ review: review.title, type: 'cash deposit', record: (row.cashEntryIds || []).join(', '), bankId: row.bankId, detail: row.frequency || '', at: row.reviewedAt, reviewer: row.reviewer?.displayName || row.reviewedBy || '' })),
+    ...(review.manualResolutions || []).map(row => ({ review: review.title, type: `${row.kind} resolution`, record: row.recordId, bankId: '', detail: row.comment, at: row.reviewedAt, reviewer: row.reviewer?.displayName || row.reviewer?.email || row.reviewer?.uid || '' })),
+    ...(review.rejectedProposals || []).map(row => ({ review: review.title, type: `${row.kind} proposal rejected`, record: row.invoiceId || (row.cashEntryIds || []).join(', '), bankId: row.bankId, detail: row.comment, at: row.rejectedAt, reviewer: row.reviewer?.displayName || row.reviewer?.email || row.reviewer?.uid || '' })),
+  ]);
+  addRowsSheet(workbook, 'Archived Decisions', [
+    { header: 'Review period', key: 'review' }, { header: 'Decision type', key: 'type' }, { header: 'Record(s)', key: 'record' },
+    { header: 'Bank ID', key: 'bankId' }, { header: 'Comment / detail', key: 'detail' },
+    { header: 'Decision time', key: 'at', style: { numFmt: 'yyyy-mm-dd hh:mm' } }, { header: 'Reviewer', key: 'reviewer' },
+  ], archivedDecisions.map(row => ({ ...row, at: dateValue(row.at) })), { A: 28, B: 24, C: 38, D: 16, E: 68, F: 21, G: 30 });
 
   const briefRows = Object.entries(report.briefs).map(([invoiceId, brief]) => ({
     invoiceId, createdAt: dateValue(brief.createdAt), model: brief.model, briefStatus: brief.status,
@@ -340,30 +398,33 @@ export async function buildReviewWorkbook(report) {
 function pdfTable(doc, headers, rows, widths, aligns = []) {
   const left = doc.page.margins.left;
   const bottom = doc.page.height - doc.page.margins.bottom - 20;
+  const availableWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+  const suppliedWidth = widths.reduce((sum, width) => sum + width, 0);
+  const scaledWidths = widths.map(width => width * (availableWidth / suppliedWidth));
   const drawHeader = () => {
     const headerY = doc.y;
     const height = 24;
-    doc.save().rect(left, headerY, widths.reduce((sum, width) => sum + width, 0), height).fill(`#${GREEN}`).restore();
+    doc.save().rect(left, headerY, availableWidth, height).fill(`#${GREEN}`).restore();
     let x = left;
     headers.forEach((header, index) => {
-      doc.fillColor('white').font('Helvetica-Bold').fontSize(7.5).text(text(header), x + 5, headerY + 7, { width: widths[index] - 10, align: aligns[index] || 'left', lineBreak: false });
-      x += widths[index];
+      doc.fillColor('white').font('Helvetica-Bold').fontSize(8).text(text(header), x + 6, headerY + 7, { width: scaledWidths[index] - 12, align: aligns[index] || 'left', lineBreak: false });
+      x += scaledWidths[index];
     });
     doc.y = headerY + height;
   };
   drawHeader();
   rows.forEach((row, rowIndex) => {
     const values = row.map(text);
-    const height = Math.max(23, ...values.map((value, index) => doc.font('Helvetica').fontSize(7.5).heightOfString(value, { width: widths[index] - 10 }) + 10));
+    const height = Math.max(23, ...values.map((value, index) => doc.font('Helvetica').fontSize(8).heightOfString(value, { width: scaledWidths[index] - 12 }) + 12));
     if (doc.y + height > bottom) { doc.addPage(); drawHeader(); }
     const rowY = doc.y;
-    if (rowIndex % 2 === 1) doc.save().rect(left, rowY, widths.reduce((sum, width) => sum + width, 0), height).fill(`#${PALE_GREEN}`).restore();
+    if (rowIndex % 2 === 1) doc.save().rect(left, rowY, availableWidth, height).fill(`#${PALE_GREEN}`).restore();
     let x = left;
     values.forEach((value, index) => {
-      doc.fillColor(`#${TEXT}`).font('Helvetica').fontSize(7.5).text(value, x + 5, rowY + 5, { width: widths[index] - 10, align: aligns[index] || 'left' });
-      x += widths[index];
+      doc.fillColor(`#${TEXT}`).font('Helvetica').fontSize(8).text(value, x + 6, rowY + 6, { width: scaledWidths[index] - 12, align: aligns[index] || 'left' });
+      x += scaledWidths[index];
     });
-    doc.save().moveTo(left, rowY + height).lineTo(left + widths.reduce((sum, width) => sum + width, 0), rowY + height).strokeColor(`#${BORDER}`).lineWidth(0.4).stroke().restore();
+    doc.save().moveTo(left, rowY + height).lineTo(left + availableWidth, rowY + height).strokeColor(`#${BORDER}`).lineWidth(0.4).stroke().restore();
     doc.y = rowY + height;
   });
   doc.x = left;
@@ -372,7 +433,7 @@ function pdfTable(doc, headers, rows, widths, aligns = []) {
 
 export async function buildReviewPdf(report) {
   return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ size: 'A4', bufferPages: true, margins: { top: 54, right: 42, bottom: 48, left: 42 }, info: { Title: report.title, Author: 'NaijaLedger', Subject: 'Sales-to-bank reconciliation review pack' } });
+    const doc = new PDFDocument({ size: 'A4', layout: 'landscape', bufferPages: true, margins: { top: 54, right: 42, bottom: 48, left: 42 }, info: { Title: report.title, Author: 'NaijaLedger', Subject: 'Sales-to-bank reconciliation review pack' } });
     const chunks = [];
     doc.on('data', chunk => chunks.push(chunk));
     doc.on('error', reject);
@@ -388,7 +449,7 @@ export async function buildReviewPdf(report) {
     decorate();
     const ensureSpace = height => { if (doc.y + height > doc.page.height - doc.page.margins.bottom - 20) doc.addPage(); };
     const section = title => {
-      ensureSpace(38);
+      ensureSpace(68);
       doc.x = doc.page.margins.left;
       doc.moveDown(0.5).font('Helvetica-Bold').fontSize(11).fillColor(`#${GREEN}`).text(text(title));
       doc.moveTo(doc.page.margins.left, doc.y + 3).lineTo(doc.page.width - doc.page.margins.right, doc.y + 3).strokeColor(`#${BORDER}`).lineWidth(0.6).stroke();
@@ -416,12 +477,14 @@ export async function buildReviewPdf(report) {
       ['Unresolved invoices', report.unresolvedInvoices.length, 'Unresolved bank entries', report.unresolvedBank.length],
       ['Invoiced total', ngn(report.totals.invoicedKobo), 'Bank credit total', ngn(report.totals.bankCreditsKobo)],
       ['Approved total', ngn(report.totals.approvedKobo), 'Reconciled value', ngn(report.totals.reconciledKobo)],
+      ['Ledger-reviewed sales', ngn(report.totals.ledgerReviewedKobo), 'Manually reviewed cash', ngn(report.totals.manualReviewedCashKobo)],
       ['Comment-resolved invoices', ngn(report.totals.manualReviewedInvoiceKobo), 'Comment-resolved bank', ngn(report.totals.manualReviewedBankKobo)],
       ['Cashbook total', ngn(report.cashReview.totals.cashSalesKobo), 'Approved cash deposits', report.cashReview.matches.length],
       ['Stock items', report.stockReview.summary.totalItems, 'Stock variances', report.stockReview.summary.varianceItems],
       ['Evidence Agent answers', report.agentAnswers.length, 'Completed reviews', report.reviewHistory.length],
     ], [112, 126, 112, 126], ['left', 'right', 'left', 'right']);
 
+    ensureSpace(112);
     section('Source fingerprints');
     paragraph(`Sales invoices SHA-256: ${report.sourceHashes?.invoices || 'Not available'}`, { size: 7.8 });
     paragraph(`Bank transactions SHA-256: ${report.sourceHashes?.bank || 'Not available'}`, { size: 7.8 });

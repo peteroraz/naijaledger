@@ -1,5 +1,6 @@
 import express from 'express';
 import multer from 'multer';
+import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseCsv, sha256 } from './csv.mjs';
@@ -13,12 +14,20 @@ import { seedWorkspace } from './store.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 export const DEMO_LIMITS = Object.freeze({ intake: 3, investigate: 5, agent: 3 });
+const MAX_AUDIT_EVENTS = 1_000;
+const audit = (state, event) => { state.audit = [...(state.audit || []), event].slice(-MAX_AUDIT_EVENTS); };
+const proposalKey = proposal => proposal.cashEntryIds
+  ? `cash:${proposal.bankId}:${proposal.cashEntryIds.join('+')}`
+  : `invoice:${proposal.invoiceId}:${proposal.bankId}`;
+const uniqueRows = rows => [...new Map(rows.map(row => [row.id, row])).values()];
 const resolutionSets = state => {
   const manualResolutions = state.manualResolutions || [];
   return {
     manualResolutions,
     invoiceIds: new Set(manualResolutions.filter(row => row.kind === 'invoice').map(row => row.recordId)),
     bankIds: new Set(manualResolutions.filter(row => row.kind === 'bank').map(row => row.recordId)),
+    cashIds: new Set(manualResolutions.filter(row => row.kind === 'cash').map(row => row.recordId)),
+    stockIds: new Set(manualResolutions.filter(row => row.kind === 'stock').map(row => row.recordId)),
   };
 };
 
@@ -27,31 +36,62 @@ const calculateReview = state => {
   const cashAllocations = state.cashAllocations || [];
   const resolutions = resolutionSets(state);
   const blockedBankIds = [...cashAllocations.map(row => row.bankId), ...resolutions.bankIds];
-  const invoiceReview = reconcile(state.invoices, state.bank, state.approved || [], blockedBankIds, [...resolutions.invoiceIds]);
-  const cashReview = reconcileCashbook(cashbook, state.bank, cashAllocations, [
+  const rejected = new Set((state.rejectedProposals || []).map(row => row.key));
+  const rawInvoiceReview = reconcile(state.invoices, state.bank, state.approved || [], blockedBankIds, [...resolutions.invoiceIds]);
+  const rejectedInvoiceProposals = rawInvoiceReview.proposals.filter(row => rejected.has(proposalKey(row)));
+  const invoiceReview = {
+    ...rawInvoiceReview,
+    proposals: rawInvoiceReview.proposals.filter(row => !rejected.has(proposalKey(row))),
+    unresolvedInvoices: uniqueRows([...rawInvoiceReview.unresolvedInvoices, ...rejectedInvoiceProposals.map(proposal => state.invoices.find(row => row.id === proposal.invoiceId)).filter(Boolean)]),
+    unresolvedBank: uniqueRows([...rawInvoiceReview.unresolvedBank, ...rejectedInvoiceProposals.map(proposal => state.bank.find(row => row.id === proposal.bankId)).filter(Boolean)]),
+  };
+  const rawCashReview = reconcileCashbook(cashbook, state.bank, cashAllocations, [
     ...invoiceReview.matches.map(row => row.bankId),
     ...invoiceReview.proposals.map(row => row.bankId),
     ...resolutions.bankIds,
-  ]);
+  ], [...resolutions.cashIds]);
+  const rejectedCashProposals = rawCashReview.proposals.filter(row => rejected.has(proposalKey(row)));
+  const cashReview = {
+    ...rawCashReview,
+    proposals: rawCashReview.proposals.filter(row => !rejected.has(proposalKey(row))),
+    unbankedCash: uniqueRows([
+      ...rawCashReview.unbankedCash,
+      ...rejectedCashProposals.flatMap(proposal => proposal.cashEntryIds.map(id => cashbook.find(row => row.id === id))).filter(Boolean),
+    ]),
+  };
   const cashBankIds = new Set([...cashReview.matches, ...cashReview.proposals].map(row => row.bankId));
   const unresolvedBank = invoiceReview.unresolvedBank.filter(row => !cashBankIds.has(row.id));
   const manualReviewedInvoiceKobo = resolutions.manualResolutions
     .filter(row => row.kind === 'invoice').reduce((total, row) => total + Number(row.amountKobo || 0), 0);
   const manualReviewedBankKobo = resolutions.manualResolutions
     .filter(row => row.kind === 'bank').reduce((total, row) => total + Number(row.amountKobo || 0), 0);
+  const manualReviewedCashKobo = resolutions.manualResolutions
+    .filter(row => row.kind === 'cash').reduce((total, row) => total + Number(row.amountKobo || 0), 0);
+  const stockReview = reconcileStock(state.stock || []);
+  const unresolvedStock = stockReview.items.filter(row => row.status !== 'balanced' && !resolutions.stockIds.has(row.sku));
+  const pendingBriefs = Object.values(state.briefs || {}).filter(brief => brief.verification?.humanReview?.status !== 'reviewed').length;
+  const pendingAgentAnswers = (state.agentAnswers || []).filter(answer => answer.verification?.humanReview?.status !== 'reviewed').length;
   return {
-    invoiceReview, cashReview, unresolvedBank, manualResolutions: resolutions.manualResolutions,
+    invoiceReview, cashReview, unresolvedBank, stockReview, unresolvedStock, manualResolutions: resolutions.manualResolutions,
+    rejectedProposals: state.rejectedProposals || [],
     closeBlockers: {
       invoiceProposals: invoiceReview.proposals.length,
       cashProposals: cashReview.proposals.length,
       unresolvedInvoices: invoiceReview.unresolvedInvoices.length,
       unresolvedBank: unresolvedBank.length,
-      total: invoiceReview.proposals.length + cashReview.proposals.length + invoiceReview.unresolvedInvoices.length + unresolvedBank.length,
+      unbankedCash: cashReview.unbankedCash.length,
+      stockVariances: unresolvedStock.length,
+      pendingDraft: state.intakeDraft ? 1 : 0,
+      pendingBriefs,
+      pendingAgentAnswers,
+      total: invoiceReview.proposals.length + cashReview.proposals.length + invoiceReview.unresolvedInvoices.length + unresolvedBank.length
+        + cashReview.unbankedCash.length + unresolvedStock.length + (state.intakeDraft ? 1 : 0) + pendingBriefs + pendingAgentAnswers,
     },
     manualTotals: {
       invoiceKobo: manualReviewedInvoiceKobo,
       bankKobo: manualReviewedBankKobo,
-      reviewedKobo: manualReviewedInvoiceKobo + manualReviewedBankKobo,
+      cashKobo: manualReviewedCashKobo,
+      reviewedKobo: manualReviewedInvoiceKobo + manualReviewedBankKobo + manualReviewedCashKobo,
     },
   };
 };
@@ -71,13 +111,16 @@ const view = (state, isDemo = false) => {
     ...review.invoiceReview.totals,
     manualReviewedInvoiceKobo: review.manualTotals.invoiceKobo,
     manualReviewedBankKobo: review.manualTotals.bankKobo,
+    manualReviewedCashKobo: review.manualTotals.cashKobo,
     manualReviewedKobo: review.manualTotals.reviewedKobo,
     reconciledKobo: review.invoiceReview.totals.approvedKobo + review.cashReview.totals.bankedCashKobo,
+    ledgerReviewedKobo: review.invoiceReview.totals.approvedKobo + review.cashReview.totals.bankedCashKobo + review.manualTotals.invoiceKobo + review.manualTotals.cashKobo,
   };
   return { ...review.invoiceReview, totals, unresolvedBank: review.unresolvedBank,
   invoices: state.invoices, bank: state.bank, approved: state.approved,
   cashbook, cashAllocations, cashReview: review.cashReview, manualResolutions: review.manualResolutions,
-  closeBlockers: review.closeBlockers, stockReview: reconcileStock(state.stock || []),
+  closeBlockers: review.closeBlockers, stockReview: review.stockReview, unresolvedStock: review.unresolvedStock,
+  rejectedProposals: review.rejectedProposals,
   reviewCycle: state.reviewCycle || { title: 'Current review', startedAt: state.updatedAt }, reviewHistory: state.reviewHistory || [],
   version: state.version, imports: state.imports, briefs: state.briefs || {}, agentAnswers: state.agentAnswers || [], intakeDraft: state.intakeDraft || null,
   audit: state.audit || [], updatedAt: state.updatedAt,
@@ -85,8 +128,26 @@ const view = (state, isDemo = false) => {
   };
 };
 const route = fn => (req, res, next) => Promise.resolve().then(() => fn(req, res, next)).catch(next);
+const boundedMemoryStorage = {
+  _handleFile(req, file, callback) {
+    const chunks = []; let size = 0; let finished = false;
+    const done = (error, value) => { if (finished) return; finished = true; callback(error, value); };
+    file.stream.on('data', chunk => {
+      size += chunk.length; req.naijaUploadBytes = Number(req.naijaUploadBytes || 0) + chunk.length;
+      if (req.naijaUploadBytes > INTAKE_LIMITS.totalBytes) {
+        file.stream.resume();
+        const error = new multer.MulterError('LIMIT_TOTAL_FILE_SIZE');
+        return done(error);
+      }
+      chunks.push(chunk);
+    });
+    file.stream.once('error', error => done(error));
+    file.stream.once('end', () => done(null, { buffer: Buffer.concat(chunks), size }));
+  },
+  _removeFile(_req, file, callback) { delete file.buffer; callback(null); },
+};
 const upload = multer({
-  storage: multer.memoryStorage(),
+  storage: boundedMemoryStorage,
   limits: { files: INTAKE_LIMITS.files, fileSize: INTAKE_LIMITS.fileBytes, fields: 4, fieldSize: INTAKE_LIMITS.textCharacters * 2 },
 });
 
@@ -128,9 +189,43 @@ function reviewedIntakeRows(requested, draft, existingInvoices, existingCashbook
   });
 }
 
+function clearAffectedState(current, kind) {
+  if (kind === 'invoices') {
+    current.approved = [];
+    current.manualResolutions = (current.manualResolutions || []).filter(row => row.kind !== 'invoice');
+    current.briefs = {};
+    current.rejectedProposals = (current.rejectedProposals || []).filter(row => row.kind !== 'invoice');
+  }
+  if (kind === 'bank') {
+    current.approved = [];
+    current.cashAllocations = [];
+    current.manualResolutions = (current.manualResolutions || []).filter(row => row.kind !== 'bank');
+    current.rejectedProposals = [];
+    current.briefs = {};
+  }
+  if (kind === 'cashbook') {
+    current.cashAllocations = [];
+    current.manualResolutions = (current.manualResolutions || []).filter(row => row.kind !== 'cash');
+    current.rejectedProposals = (current.rejectedProposals || []).filter(row => row.kind !== 'cash');
+  }
+  if (kind === 'stock') current.manualResolutions = (current.manualResolutions || []).filter(row => row.kind !== 'stock');
+  current.agentAnswers = [];
+}
+
 export function createApp({ verifyToken, store, investigate = investigateWithMeta, extractIntake = extractInvoiceIntake, ragAgent = createRagAgent() }) {
   const app = express();
   app.set('trust proxy', 1);
+  app.use((req, res, next) => {
+    res.set({
+      'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' https://*.googleapis.com https://*.firebaseio.com wss://*.firebaseio.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+      'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
+      'X-Content-Type-Options': 'nosniff',
+      'X-Frame-Options': 'DENY',
+      'Referrer-Policy': 'strict-origin-when-cross-origin',
+      'Permissions-Policy': 'camera=(), geolocation=(), microphone=(self)',
+    });
+    next();
+  });
   const publicDemoBuckets = new Map();
   const consumePublicDemoRequest = req => {
     const key = String(req.ip || req.socket.remoteAddress || 'unknown').slice(0, 160);
@@ -164,7 +259,7 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
     res.set('Cache-Control', 'no-store').type('application/javascript')
       .send(`window.__NAIJALEDGER_FIREBASE__=${JSON.stringify(config).replaceAll('<', '\\u003c')};`);
   });
-  app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
+  app.get('/api/health', (_req, res) => res.json({ status: 'ok', commit: process.env.APP_COMMIT_SHA || 'local' }));
   app.use('/api', route(async (req, res, next) => {
     const match = /^Bearer ([^\s]+)$/.exec(req.get('authorization') || '');
     if (!match) return res.status(401).json({ error: 'Sign in to continue' });
@@ -178,7 +273,7 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
     }
     catch { res.status(401).json({ error: 'Session expired; sign in again' }); }
   }));
-  app.get('/api/workspace', route(async (req, res) => res.json(view(await store.get(req.uid), req.isAnonymous))));
+  app.get('/api/workspace', route(async (req, res) => res.json(view(await store.get(req.uid, req.isAnonymous), req.isAnonymous))));
   app.post('/api/demo/reset', route(async (req, res) => {
     if (!req.isAnonymous) return res.status(403).json({ error: 'Reset sample is available only in Judge Demo' });
     const state = await store.change(req.uid, req.body?.version, current => {
@@ -192,19 +287,23 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
     });
     res.json(view(state, true));
   }));
-  app.post('/api/intake/extract', upload.array('files', INTAKE_LIMITS.files), route(async (req, res) => {
+  app.post('/api/intake/extract', (req, res, next) => {
+    const declared = Number(req.get('content-length') || 0);
+    if (declared > INTAKE_LIMITS.requestBytes) return res.status(413).json({ error: `Combined upload must be ${Math.floor(INTAKE_LIMITS.totalBytes / 1024 / 1024)} MB or smaller` });
+    next();
+  }, upload.array('files', INTAKE_LIMITS.files), route(async (req, res) => {
     const version = Number(req.body?.version);
     if (!Number.isInteger(version)) return res.status(400).json({ error: 'Workspace version is required' });
     await consumeDemoModelCall(req, 'intake');
     const draft = await extractIntake(req.files || [], req.body?.text || '');
     const state = await store.change(req.uid, version, current => {
       current.intakeDraft = draft;
-      current.audit = [...(current.audit || []), {
+      audit(current, {
         action: 'intake-extracted', at: draft.createdAt,
         sources: draft.sources.length, rows: draft.candidates.length,
         sourceFingerprint: draft.sourceFingerprint,
         by: req.uid, actor: req.actor,
-      }].slice(-100);
+      });
       return current;
     });
     res.json(view(state, req.isAnonymous));
@@ -225,12 +324,12 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
       current.approved = current.approved || [];
       current.cashAllocations = current.cashAllocations || [];
       current.briefs = {};
-      current.audit = [...(current.audit || []), {
+      audit(current, {
         action: 'intake-committed', at: new Date().toISOString(), rows: accepted.length, invoices: invoices.length, cashSales: cashSales.length,
         sources: new Set(accepted.map(row => row.record.sourceHash)).size,
         sourceFingerprint: current.intakeDraft.sourceFingerprint,
         by: req.uid, actor: req.actor,
-      }].slice(-100);
+      });
       current.intakeDraft = null;
       return current;
     });
@@ -242,7 +341,7 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
       if (!current.intakeDraft || current.intakeDraft.id !== draftId) {
         const error = new Error('The extraction draft changed; reload the workspace'); error.status = 409; throw error;
       }
-      current.audit = [...(current.audit || []), { action: 'intake-discarded', at: new Date().toISOString(), sourceFingerprint: current.intakeDraft.sourceFingerprint, by: req.uid, actor: req.actor }].slice(-100);
+      audit(current, { action: 'intake-discarded', at: new Date().toISOString(), sourceFingerprint: current.intakeDraft.sourceFingerprint, by: req.uid, actor: req.actor });
       current.intakeDraft = null;
       return current;
     });
@@ -252,19 +351,34 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
     const kind = req.params.kind;
     if (!['invoices', 'bank', 'cashbook', 'stock'].includes(kind) || typeof req.body?.csv !== 'string') return res.status(400).json({ error: 'Expected invoices, bank, cashbook or stock CSV' });
     const rows = parseCsv(req.body.csv, kind);
+    const reason = String(req.body?.reason || '').replace(/\s+/g, ' ').trim().slice(0, 500);
     const state = await store.change(req.uid, req.body.version, current => {
-      if ((current[kind] || []).length > 0) {
-        const error = new Error(`Complete the current review before replacing its ${kind} records. The completed period will remain in review history.`);
-        error.status = 409;
-        throw error;
+      const replacing = (current[kind] || []).length > 0;
+      if (replacing && req.body?.confirmReplace !== true) {
+        const error = new Error(`This review already has ${kind} records. Confirm replacement and provide an audit reason, or complete the period first.`); error.status = 409; throw error;
       }
+      if (replacing && reason.length < 5) { const error = new Error('Add an audit reason of at least 5 characters before replacing records'); error.status = 400; throw error; }
+      const previous = { rows: (current[kind] || []).length, sourceHash: current.imports?.[kind] || null };
+      if (replacing) clearAffectedState(current, kind);
       current[kind] = rows;
       current.imports[kind] = sha256(req.body.csv);
-      if (['invoices', 'bank'].includes(kind)) current.approved = [];
-      if (['bank', 'cashbook'].includes(kind)) current.cashAllocations = [];
-      current.briefs = {};
-      if (kind === 'invoices') current.intakeDraft = null;
-      current.audit = [...(current.audit || []), { action: 'imported', kind, rows: rows.length, sourceHash: current.imports[kind], at: new Date().toISOString(), by: req.uid, actor: req.actor }].slice(-100);
+      audit(current, { action: replacing ? 'source-replaced' : 'imported', kind, rows: rows.length, previousRows: previous.rows, previousSourceHash: previous.sourceHash, sourceHash: current.imports[kind], comment: replacing ? reason : undefined, at: new Date().toISOString(), by: req.uid, actor: req.actor });
+      return current;
+    });
+    res.json(view(state, req.isAnonymous));
+  }));
+  app.post('/api/sources/:kind/clear', route(async (req, res) => {
+    const kind = req.params.kind;
+    const comment = String(req.body?.comment || '').replace(/\s+/g, ' ').trim().slice(0, 500);
+    if (!['invoices', 'bank', 'cashbook', 'stock'].includes(kind)) return res.status(400).json({ error: 'Select invoices, bank, cashbook or stock' });
+    if (comment.length < 5) return res.status(400).json({ error: 'Add an audit reason of at least 5 characters before clearing records' });
+    const state = await store.change(req.uid, req.body?.version, current => {
+      const previousRows = (current[kind] || []).length;
+      const previousSourceHash = current.imports?.[kind] || null;
+      clearAffectedState(current, kind);
+      current[kind] = [];
+      delete current.imports[kind];
+      audit(current, { action: 'source-cleared', kind, previousRows, previousSourceHash, comment, at: new Date().toISOString(), by: req.uid, actor: req.actor });
       return current;
     });
     res.json(view(state, req.isAnonymous));
@@ -277,7 +391,7 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
       if (!proposal) { const error = new Error('Pair is not an available proposal'); error.status = 400; throw error; }
       current.approved.push({ invoiceId, bankId, reviewedAt: new Date().toISOString(), reviewedBy: req.uid, reviewer: req.actor });
       current.briefs = {};
-      current.audit = [...(current.audit || []), { action: 'approved', invoiceId, bankId, by: req.uid, actor: req.actor, at: new Date().toISOString() }].slice(-100);
+      audit(current, { action: 'approved', invoiceId, bankId, by: req.uid, actor: req.actor, at: new Date().toISOString() });
       return current;
     });
     res.json(view(state, req.isAnonymous));
@@ -289,7 +403,59 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
         .find(row => row.bankId === bankId && JSON.stringify(row.cashEntryIds) === JSON.stringify(cashEntryIds));
       if (!proposal) { const error = new Error('Cash lodgement is not an available proposal'); error.status = 400; throw error; }
       current.cashAllocations = [...(current.cashAllocations || []), { cashEntryIds, bankId, reviewedAt: new Date().toISOString(), reviewedBy: req.uid, reviewer: req.actor, frequency: proposal.frequency }];
-      current.audit = [...(current.audit || []), { action: 'cash-deposit-approved', bankId, cashEntryIds, rows: cashEntryIds.length, by: req.uid, actor: req.actor, at: new Date().toISOString() }].slice(-100);
+      audit(current, { action: 'cash-deposit-approved', bankId, cashEntryIds, rows: cashEntryIds.length, by: req.uid, actor: req.actor, at: new Date().toISOString() });
+      return current;
+    });
+    res.json(view(state, req.isAnonymous));
+  }));
+  app.post('/api/proposals/reject', route(async (req, res) => {
+    const kind = req.body?.kind;
+    const comment = String(req.body?.comment || '').replace(/\s+/g, ' ').trim().slice(0, 500);
+    if (!['invoice', 'cash'].includes(kind) || comment.length < 5) return res.status(400).json({ error: 'Select a proposal and add a rejection reason of at least 5 characters' });
+    const state = await store.change(req.uid, req.body?.version, current => {
+      const review = calculateReview(current);
+      const proposal = kind === 'invoice'
+        ? review.invoiceReview.proposals.find(row => row.invoiceId === req.body?.invoiceId && row.bankId === req.body?.bankId)
+        : review.cashReview.proposals.find(row => row.bankId === req.body?.bankId && JSON.stringify(row.cashEntryIds) === JSON.stringify(req.body?.cashEntryIds));
+      if (!proposal) { const error = new Error('Proposal is no longer available; reload the review'); error.status = 409; throw error; }
+      const rejectedAt = new Date().toISOString();
+      const rejection = { id: `rejection-${randomUUID()}`, key: proposalKey(proposal), kind, invoiceId: proposal.invoiceId || null, bankId: proposal.bankId, cashEntryIds: proposal.cashEntryIds || [], amountKobo: proposal.amountKobo, comment, rejectedAt, reviewer: req.actor };
+      current.rejectedProposals = [...(current.rejectedProposals || []), rejection];
+      audit(current, { action: 'proposal-rejected', kind, invoiceId: proposal.invoiceId, bankId: proposal.bankId, cashEntryIds: proposal.cashEntryIds, comment, at: rejectedAt, by: req.uid, actor: req.actor });
+      return current;
+    });
+    res.json(view(state, req.isAnonymous));
+  }));
+  app.post('/api/proposals/reopen', route(async (req, res) => {
+    const comment = String(req.body?.comment || '').replace(/\s+/g, ' ').trim().slice(0, 500);
+    if (!req.body?.rejectionId || comment.length < 5) return res.status(400).json({ error: 'Select a rejected proposal and add a reopen reason' });
+    const state = await store.change(req.uid, req.body?.version, current => {
+      const rejection = (current.rejectedProposals || []).find(row => row.id === req.body.rejectionId);
+      if (!rejection) { const error = new Error('Rejected proposal no longer exists'); error.status = 409; throw error; }
+      current.rejectedProposals = current.rejectedProposals.filter(row => row.id !== rejection.id);
+      audit(current, { action: 'proposal-reopened', kind: rejection.kind, invoiceId: rejection.invoiceId, bankId: rejection.bankId, comment, at: new Date().toISOString(), by: req.uid, actor: req.actor });
+      return current;
+    });
+    res.json(view(state, req.isAnonymous));
+  }));
+  app.post('/api/decisions/reopen', route(async (req, res) => {
+    const type = req.body?.type;
+    const comment = String(req.body?.comment || '').replace(/\s+/g, ' ').trim().slice(0, 500);
+    if (!['invoice-match', 'cash-deposit', 'resolution'].includes(type) || comment.length < 5) return res.status(400).json({ error: 'Select a decision and add a reopen reason of at least 5 characters' });
+    const state = await store.change(req.uid, req.body?.version, current => {
+      let removed;
+      if (type === 'invoice-match') {
+        removed = (current.approved || []).find(row => row.invoiceId === req.body?.invoiceId && row.bankId === req.body?.bankId);
+        current.approved = (current.approved || []).filter(row => row !== removed);
+      } else if (type === 'cash-deposit') {
+        removed = (current.cashAllocations || []).find(row => row.bankId === req.body?.bankId);
+        current.cashAllocations = (current.cashAllocations || []).filter(row => row !== removed);
+      } else {
+        removed = (current.manualResolutions || []).find(row => row.id === req.body?.resolutionId);
+        current.manualResolutions = (current.manualResolutions || []).filter(row => row !== removed);
+      }
+      if (!removed) { const error = new Error('Decision no longer exists; reload the review'); error.status = 409; throw error; }
+      audit(current, { action: 'decision-reopened', decisionType: type, invoiceId: removed.invoiceId, bankId: removed.bankId, recordId: removed.recordId, comment, at: new Date().toISOString(), by: req.uid, actor: req.actor });
       return current;
     });
     res.json(view(state, req.isAnonymous));
@@ -298,27 +464,29 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
     const kind = req.body?.kind;
     const recordId = String(req.body?.recordId || '').trim().slice(0, 160);
     const comment = String(req.body?.comment || '').replace(/\s+/g, ' ').trim().slice(0, 1000);
-    if (!['invoice', 'bank'].includes(kind) || !recordId) return res.status(400).json({ error: 'Select an unresolved invoice or bank entry' });
+    if (!['invoice', 'bank', 'cash', 'stock'].includes(kind) || !recordId) return res.status(400).json({ error: 'Select an unresolved invoice, bank, cash or stock entry' });
     if (comment.length < 5) return res.status(400).json({ error: 'Add a review comment of at least 5 characters before resolving this record' });
     const state = await store.change(req.uid, req.body?.version, current => {
       const review = calculateReview(current);
-      const source = (kind === 'invoice' ? review.invoiceReview.unresolvedInvoices : review.unresolvedBank)
-        .find(row => row.id === recordId);
+      const source = (kind === 'invoice' ? review.invoiceReview.unresolvedInvoices
+        : kind === 'bank' ? review.unresolvedBank
+          : kind === 'cash' ? review.cashReview.unbankedCash
+            : review.unresolvedStock).find(row => (kind === 'stock' ? row.sku : row.id) === recordId);
       if (!source) { const error = new Error('This record is no longer unresolved; reload the current review'); error.status = 409; throw error; }
       const reviewedAt = new Date().toISOString();
       const resolution = {
-        id: `resolution-${kind}-${recordId}-${reviewedAt.replace(/\D/g, '').slice(0, 14)}`,
-        kind, recordId, amountKobo: source.amountKobo, comment, reviewedAt,
+        id: `resolution-${kind}-${randomUUID()}`,
+        kind, recordId, amountKobo: Number(source.amountKobo || 0), varianceQty: source.varianceQty ?? null, comment, reviewedAt,
         reviewer: req.actor, metaInvestigated: kind === 'invoice' && Boolean(current.briefs?.[recordId]),
-        sourceHash: current.imports?.[kind === 'invoice' ? 'invoices' : 'bank'] || null,
+        sourceHash: current.imports?.[kind === 'invoice' ? 'invoices' : kind === 'cash' ? 'cashbook' : kind] || null,
       };
       current.manualResolutions = [...(current.manualResolutions || []), resolution];
-      current.audit = [...(current.audit || []), {
+      audit(current, {
         action: 'exception-resolved', kind, recordId,
-        ...(kind === 'invoice' ? { invoiceId: recordId } : { bankId: recordId }),
-        amountKobo: source.amountKobo, comment, at: reviewedAt, by: req.uid, actor: req.actor,
+        ...(kind === 'invoice' ? { invoiceId: recordId } : kind === 'bank' ? { bankId: recordId } : {}),
+        amountKobo: Number(source.amountKobo || 0), varianceQty: source.varianceQty ?? null, comment, at: reviewedAt, by: req.uid, actor: req.actor,
         metaInvestigated: resolution.metaInvestigated,
-      }].slice(-100);
+      });
       return current;
     });
     res.json(view(state, req.isAnonymous));
@@ -341,8 +509,19 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
       return { sku, item, unit, openingQty: quantity('openingQty'), receivedQty: quantity('receivedQty'), soldQty: quantity('soldQty'), adjustmentQty: quantity('adjustmentQty'), countedQty: quantity('countedQty'), sourceRow: index + 2 };
     });
     const state = await store.change(req.uid, req.body?.version, current => {
+      const previousBySku = new Map((current.stock || []).map(row => [row.sku, row]));
+      const changes = rows.map(row => {
+        const previous = previousBySku.get(row.sku);
+        return previous && JSON.stringify(previous) !== JSON.stringify(row) ? { sku: row.sku, before: previous, after: row } : previous ? null : { sku: row.sku, before: null, after: row };
+      }).filter(Boolean);
+      const nextSkus = new Set(rows.map(row => row.sku));
+      for (const previous of (current.stock || [])) {
+        if (!nextSkus.has(previous.sku)) changes.push({ sku: previous.sku, before: previous, after: null });
+      }
       current.stock = rows; current.imports.stock = sha256(JSON.stringify(rows));
-      current.audit = [...(current.audit || []), { action: 'stock-count-saved', rows: rows.length, by: req.uid, actor: req.actor, at: new Date().toISOString() }].slice(-100);
+      const changedSkus = new Set(changes.map(change => change.sku));
+      current.manualResolutions = (current.manualResolutions || []).filter(row => row.kind !== 'stock' || !changedSkus.has(row.recordId));
+      audit(current, { action: 'stock-count-saved', rows: rows.length, changedRows: changes.length, changes: changes.slice(0, 200), by: req.uid, actor: req.actor, at: new Date().toISOString() });
       return current;
     });
     res.json(view(state, req.isAnonymous));
@@ -353,15 +532,16 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
     const state = await store.change(req.uid, req.body?.version, current => {
       const review = calculateReview(current);
       if (review.closeBlockers.total > 0) {
-        const error = new Error(`Resolve all review items first: ${review.closeBlockers.unresolvedInvoices} invoice exceptions, ${review.closeBlockers.unresolvedBank} bank exceptions, ${review.closeBlockers.invoiceProposals + review.closeBlockers.cashProposals} match proposals remain`);
+        const error = new Error(`Resolve all review items first: ${review.closeBlockers.unresolvedInvoices} invoice exceptions, ${review.closeBlockers.unresolvedBank} bank exceptions, ${review.closeBlockers.invoiceProposals + review.closeBlockers.cashProposals} match proposals, ${review.closeBlockers.unbankedCash} unbanked cash entries, ${review.closeBlockers.stockVariances} stock variances, ${review.closeBlockers.pendingDraft + review.closeBlockers.pendingBriefs + review.closeBlockers.pendingAgentAnswers} pending evidence reviews remain`);
         error.status = 400;
         throw error;
       }
       const completedAt = new Date().toISOString();
+      audit(current, { action: 'review-cycle-completed', at: completedAt, title, by: req.uid, actor: req.actor });
       const snapshot = reviewCycleSnapshot(current, title, completedAt, req.actor);
       current.reviewHistory = [...(current.reviewHistory || []), snapshot].slice(-12);
       current.invoices = []; current.bank = []; current.cashbook = []; current.stock = [];
-      current.approved = []; current.cashAllocations = []; current.manualResolutions = []; current.briefs = {}; current.intakeDraft = null; current.imports = {};
+      current.approved = []; current.cashAllocations = []; current.rejectedProposals = []; current.manualResolutions = []; current.briefs = {}; current.agentAnswers = []; current.intakeDraft = null; current.imports = {};
       current.reviewCycle = { title: 'New review', startedAt: completedAt };
       current.audit = [{ action: 'review-cycle-started', at: completedAt, completedReviewId: snapshot.id, by: req.uid, actor: req.actor }];
       return current;
@@ -371,7 +551,7 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
   app.post('/api/investigate', route(async (req, res) => {
     const { invoiceId, version } = req.body || {};
     if (typeof invoiceId !== 'string' || invoiceId.length > 160) return res.status(400).json({ error: 'Select an invoice' });
-    const state = await store.get(req.uid);
+    const state = await store.get(req.uid, req.isAnonymous);
     if (state.version !== version) return res.status(409).json({ error: 'Workspace changed; reload and review again' });
     const evidence = evidenceFor(state, invoiceId);
     await consumeDemoModelCall(req, 'investigate');
@@ -383,7 +563,7 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
     const question = String(req.body?.question || '').replace(/\s+/g, ' ').trim();
     const version = Number(req.body?.version);
     if (question.length < 4 || question.length > 600) return res.status(400).json({ error: 'Ask a question between 4 and 600 characters' });
-    const state = await store.get(req.uid);
+    const state = await store.get(req.uid, req.isAnonymous);
     if (state.version !== version) return res.status(409).json({ error: 'Workspace changed; reload before asking the Evidence Agent' });
     await consumeDemoModelCall(req, 'agent');
     const answer = await ragAgent.answer({ uid: req.uid, state, question });
@@ -407,13 +587,13 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
     res.json(view(state, req.isAnonymous));
   }));
   app.get('/api/handover', route(async (req, res) => {
-    const state = await store.get(req.uid);
+    const state = await store.get(req.uid, req.isAnonymous);
     const report = createReviewPack(state);
     res.set('Content-Disposition', 'attachment; filename="naijaledger-review-pack.json"');
     res.json(report);
   }));
   app.get('/api/handover.pdf', route(async (req, res) => {
-    const report = createReviewPack(await store.get(req.uid));
+    const report = createReviewPack(await store.get(req.uid, req.isAnonymous));
     const file = await buildReviewPdf(report);
     res.set({
       'Cache-Control': 'no-store',
@@ -423,7 +603,7 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
     }).send(file);
   }));
   app.get('/api/handover.xlsx', route(async (req, res) => {
-    const report = createReviewPack(await store.get(req.uid));
+    const report = createReviewPack(await store.get(req.uid, req.isAnonymous));
     const file = await buildReviewWorkbook(report);
     res.set({
       'Cache-Control': 'no-store',
@@ -437,8 +617,9 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
   app.get('*', (_req, res) => res.sendFile(join(here, '../dist/index.html')));
   app.use((error, _req, res, _next) => {
     if (error instanceof multer.MulterError) {
-      if (error.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'Each source file must be 15 MB or smaller' });
+      if (error.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: `Each source file must be ${Math.floor(INTAKE_LIMITS.fileBytes / 1024 / 1024)} MB or smaller` });
       if (error.code === 'LIMIT_FILE_COUNT') return res.status(413).json({ error: `Choose no more than ${INTAKE_LIMITS.files} files` });
+      if (error.code === 'LIMIT_TOTAL_FILE_SIZE') return res.status(413).json({ error: `Combined source files must be ${Math.floor(INTAKE_LIMITS.totalBytes / 1024 / 1024)} MB or smaller` });
       return res.status(400).json({ error: 'The document upload could not be read' });
     }
     if (error.type === 'entity.too.large') return res.status(413).json({ error: 'CSV exceeds request limit' });

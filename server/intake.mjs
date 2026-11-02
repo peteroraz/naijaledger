@@ -1,13 +1,14 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { extname } from 'node:path';
 import mammoth from 'mammoth';
 import ExcelJS from 'exceljs';
 
 export const INTAKE_LIMITS = Object.freeze({
-  files: 8,
-  fileBytes: 15 * 1024 * 1024,
-  totalBytes: 40 * 1024 * 1024,
+  files: 6,
+  fileBytes: 10 * 1024 * 1024,
+  totalBytes: 28 * 1024 * 1024,
+  requestBytes: 30 * 1024 * 1024,
   textCharacters: 20_000,
   entries: 100,
 });
@@ -112,16 +113,27 @@ async function convertAudioToWav(buffer, spawnProcess = spawn) {
     const output = [];
     const errors = [];
     let outputBytes = 0;
+    let settled = false;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error); else resolve(value);
+    };
+    const timer = setTimeout(() => {
+      process.kill('SIGKILL');
+      finish(intakeError('Audio conversion exceeded 30 seconds', 422));
+    }, 30_000);
     process.stdout.on('data', chunk => {
       outputBytes += chunk.length;
       if (outputBytes > 32 * 1024 * 1024) process.kill('SIGKILL');
       else output.push(chunk);
     });
     process.stderr.on('data', chunk => errors.push(chunk));
-    process.once('error', error => reject(intakeError(`Audio conversion failed: ${error.message}`, 422)));
+    process.once('error', error => finish(intakeError(`Audio conversion failed: ${error.message}`, 422)));
     process.once('close', code => {
-      if (code !== 0 || !output.length) return reject(intakeError(`Audio could not be read${errors.length ? `: ${Buffer.concat(errors).toString('utf8').slice(0, 180)}` : ''}`, 422));
-      resolve(Buffer.concat(output));
+      if (code !== 0 || !output.length) return finish(intakeError(`Audio could not be read${errors.length ? `: ${Buffer.concat(errors).toString('utf8').slice(0, 180)}` : ''}`, 422));
+      finish(null, Buffer.concat(output));
     });
     process.stdin.on('error', () => {});
     process.stdin.end(buffer);
@@ -305,7 +317,7 @@ export async function extractInvoiceIntake(files = [], text = '', {
   if (!Array.isArray(files) || files.length > INTAKE_LIMITS.files) throw intakeError(`Choose no more than ${INTAKE_LIMITS.files} files`);
   if (String(text).length > INTAKE_LIMITS.textCharacters) throw intakeError(`Typed entry exceeds ${INTAKE_LIMITS.textCharacters.toLocaleString()} characters`);
   const totalBytes = files.reduce((sum, file) => sum + Number(file.size || file.buffer?.length || 0), 0);
-  if (totalBytes > INTAKE_LIMITS.totalBytes) throw intakeError('Combined files exceed 40 MB');
+  if (totalBytes > INTAKE_LIMITS.totalBytes) throw intakeError(`Combined files exceed ${Math.floor(INTAKE_LIMITS.totalBytes / 1024 / 1024)} MB`);
   const sources = files.map((file, index) => {
     const type = sourceKind(file.mimetype, file.originalname);
     if (type === 'unsupported') throw intakeError(`Unsupported file: ${clean(file.originalname, 120)}`);
@@ -329,17 +341,29 @@ export async function extractInvoiceIntake(files = [], text = '', {
     text: typed,
   });
   if (!sources.length) throw intakeError('Add at least one document, voice recording, or typed entry');
-  const usedIds = new Set();
   const options = { apiKey, fetcher, transcribe };
-  const processed = await Promise.all(sources.map(source => processSource(source, options, usedIds)));
-  const candidates = processed.flatMap(result => result.entries).slice(0, INTAKE_LIMITS.entries);
+  const processed = new Array(sources.length);
+  let nextSource = 0;
+  await Promise.all(Array.from({ length: Math.min(2, sources.length) }, async () => {
+    while (nextSource < sources.length) {
+      const index = nextSource; nextSource += 1;
+      processed[index] = await processSource(sources[index], options, new Set());
+    }
+  }));
+  const usedIds = new Set();
+  const candidates = processed.flatMap(result => result.entries).map(entry => {
+    let invoiceId = entry.invoiceId; const base = invoiceId;
+    for (let suffix = 2; usedIds.has(invoiceId); suffix += 1) invoiceId = `${base}-${suffix}`;
+    usedIds.add(invoiceId);
+    return { ...entry, invoiceId };
+  }).slice(0, INTAKE_LIMITS.entries);
   if (!candidates.length && processed.every(result => result.source.status === 'failed')) {
     throw intakeError(processed.map(result => result.source.error).filter(Boolean).join(' · ') || 'No source could be processed', 502);
   }
   const createdAt = now().toISOString();
   const retainedSources = processed.map(result => result.source);
   return {
-    id: `intake-${createdAt.replace(/\D/g, '').slice(0, 14)}`,
+    id: `intake-${createdAt.replace(/\D/g, '').slice(0, 14)}-${randomUUID().slice(0, 8)}`,
     createdAt,
     model: SPARK_MODEL,
     voiceModel: VOICE_MODEL,

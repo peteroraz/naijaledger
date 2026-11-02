@@ -57,3 +57,17 @@ test('Evidence Agent retrieves stock evidence by exact SKU', async () => {
   assert.equal(answer.retrieval.mode, 'structured-evidence');
   assert.ok(answer.retrieval.selectedCount > 0);
 });
+
+test('invoice-only questions inject linked bank candidates instead of generic policy-only context', async () => {
+  const state = seedWorkspace();
+  const agent = createRagAgent({
+    apiKey: 'test-only',
+    generator: async (question, evidence, fingerprint) => {
+      assert.ok(evidence.some(chunk => chunk.id === 'invoice:INV-002'));
+      assert.ok(evidence.some(chunk => chunk.id === 'bank:BNK-004'));
+      assert.ok(evidence.filter(chunk => chunk.type === 'policy').length <= 1);
+      return generated(question, fingerprint);
+    },
+  });
+  await agent.answer({ uid: 'alice', state, question: 'Why is INV-002 unresolved, and what evidence should I check next?' });
+});
