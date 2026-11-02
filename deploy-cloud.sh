@@ -22,6 +22,7 @@ if ! gcloud iam service-accounts describe "$IDENTITY" --project "$PROJECT" >/dev
   gcloud iam service-accounts create "$SERVICE_ACCOUNT" --display-name 'NaijaLedger runtime' --project "$PROJECT"
 fi
 gcloud projects add-iam-policy-binding "$PROJECT" --member="serviceAccount:${IDENTITY}" --role=roles/datastore.user --condition=None --quiet >/dev/null
+gcloud projects add-iam-policy-binding "$PROJECT" --member="serviceAccount:${IDENTITY}" --role=roles/firebaseauth.viewer --condition=None --quiet >/dev/null
 
 # Cloud Build's default identity needs permission to build source deployments.
 BUILD_IDENTITY=$(gcloud builds get-default-service-account --project "$PROJECT")
