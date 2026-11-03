@@ -399,7 +399,10 @@ function Desk({ user }: { user: User }) {
     if (comment.length < 5) return setError('Add a rejection reason of at least 5 characters.');
     setBusy(`reject-${'invoiceId' in proposal ? proposal.invoiceId : proposal.bankId}`); setError('');
     try {
-      setData(await api<Workspace>(user, '/proposals/reject', json({ kind, ...proposal, comment, version: data.version })));
+      const payload = kind === 'invoice'
+        ? { kind, invoiceId: (proposal as Match).invoiceId, bankId: proposal.bankId, comment, version: data.version }
+        : { kind, cashEntryIds: (proposal as CashProposal).cashEntryIds, bankId: proposal.bankId, comment, version: data.version };
+      setData(await api<Workspace>(user, '/proposals/reject', json(payload)));
     } catch (e) { setError((e as Error).message); void refresh(); }
     finally { setBusy(''); }
   }
