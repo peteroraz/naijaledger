@@ -2,6 +2,8 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { sha256 } from './csv.mjs';
+import { reconcile } from './reconcile.mjs';
+import { reconcileCashbook } from './operations.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const MODEL = 'muse-spark-1.3';
@@ -128,7 +130,28 @@ export function buildRagChunks(state) {
     text: clean(`Human-approved ${allocation.frequency || ''} cash lodgement from cash entries ${(allocation.cashEntryIds || []).join(', ')} to bank row ${allocation.bankId}. Reviewed at ${allocation.reviewedAt || 'not supplied'}.`),
     sourceHash: sha256(JSON.stringify(allocation)), verificationStatus: 'human_approved',
   });
-  for (const resolution of (state.manualResolutions || []).slice(-60)) chunks.push({
+  const manualResolutions = state.manualResolutions || [];
+  const resolvedBankIds = manualResolutions.filter(row => row.kind === 'bank').map(row => row.recordId);
+  const resolvedInvoiceIds = manualResolutions.filter(row => row.kind === 'invoice').map(row => row.recordId);
+  const resolvedCashIds = manualResolutions.filter(row => row.kind === 'cash').map(row => row.recordId);
+  const invoiceReview = reconcile(
+    state.invoices || [], state.bank || [], state.approved || [],
+    [...(state.cashAllocations || []).map(row => row.bankId), ...resolvedBankIds], resolvedInvoiceIds,
+  );
+  const cashReview = reconcileCashbook(
+    state.cashbook || [], state.bank || [], state.cashAllocations || [],
+    [...invoiceReview.matches, ...invoiceReview.proposals].map(row => row.bankId).concat(resolvedBankIds), resolvedCashIds,
+  );
+  const rejectedKeys = new Set((state.rejectedProposals || []).map(row => row.key));
+  for (const proposal of cashReview.proposals.filter(row => !rejectedKeys.has(`cash:${row.bankId}:${row.cashEntryIds.join('+')}`)).slice(0, 24)) chunks.push({
+    id: `cash-batch:${proposal.frequency}:${proposal.bankId}`, ref: `${proposal.cashEntryIds.join(' + ')} → ${proposal.bankId}`,
+    type: 'current_cash_batch', title: `Proposed ${proposal.frequency} cash batch → ${proposal.bankId}`,
+    label: 'Current unapproved cash-lodgement proposal', locator: `${proposal.startDate} to ${proposal.endDate}`, cycle,
+    amountKobo: proposal.amountKobo, date: proposal.endDate, bankId: proposal.bankId, cashEntryIds: proposal.cashEntryIds,
+    text: clean(`Current unapproved ${proposal.frequency} cash-batch proposal. Cashbook entries ${proposal.cashEntryIds.join(', ')} total ${moneyText(proposal.amountKobo)} for ${proposal.startDate} to ${proposal.endDate}; candidate bank row ${proposal.bankId} has the same amount within the permitted date window. ${proposal.reason} This is not an approved allocation.`),
+    sourceHash: sha256(JSON.stringify(proposal)), verificationStatus: 'deterministic_proposal_unapproved',
+  });
+  for (const resolution of manualResolutions.slice(-60)) chunks.push({
     id: `resolution:${resolution.kind}:${resolution.recordId}`, ref: resolution.recordId, type: 'manual_resolution',
     title: `Human-resolved ${resolution.kind} ${resolution.recordId}`, label: 'Commented human resolution',
     locator: resolution.reviewedAt || 'review log', cycle, amountKobo: resolution.amountKobo || null,
@@ -149,7 +172,8 @@ export function buildRagChunks(state) {
     text: clean(`Completed review ${review.title}, from ${review.startedAt} to ${review.completedAt}. ${review.counts?.invoices || 0} invoices, ${review.counts?.bank || 0} bank rows, ${review.counts?.cashbook || 0} cashbook entries, ${review.counts?.stock || 0} stock items. ${review.results?.approvedInvoiceMatches || 0} invoice matches, ${review.results?.approvedCashDeposits || 0} cash deposits, ${review.results?.manualResolutions || 0} commented manual resolutions, ${review.results?.stockVarianceItems || 0} stock variances.`),
     sourceHash: sha256(JSON.stringify(review)), verificationStatus: 'archived_summary',
   });
-  return [...chunks, ...policyChunks()].slice(0, MAX_CHUNKS);
+  const policies = policyChunks();
+  return [...chunks.slice(0, Math.max(0, MAX_CHUNKS - policies.length)), ...policies];
 }
 
 const STOP_WORDS = new Set('a an and are as at be by can for from has have how i in is it may of on or our should that the their this to was were what when which why with'.split(' '));
@@ -175,17 +199,24 @@ function lexicalRetrieve(chunks, question, limit = 14) {
     if (chunk.amountKobo != null && amounts.includes(Math.abs(chunk.amountKobo))) { score += 10; reasons.push('exact amount'); }
     const intent = {
       stock: /stock|count|shortage|surplus|sku|inventory/, cashbook: /cash|daybook|lodgement|deposit|cashier/,
+      current_cash_batch: /cash|daybook|lodgement|deposit|cashier|batch|takings/,
       bank: /bank|credit|statement|transfer/, invoice: /invoice|customer|receivable/, policy: /rule|procedure|how|policy|evidence/,
-      review_history: /history|previous|last|completed|period/,
+      review_history: /history|previous|prior|last|completed|archived|period/,
+      manual_resolution_history: /history|previous|prior|last|completed|archived|period/,
     };
     if (intent[chunk.type]?.test(queryText)) { score += 3; reasons.push(`${chunk.type.replace('_', ' ')} intent`); }
     return { ...chunk, lexicalScore: score, retrievalReason: reasons.join(' · ') || 'supporting evidence' };
   }).filter(chunk => chunk.lexicalScore > 0).sort((a, b) => b.lexicalScore - a.lexicalScore || a.id.localeCompare(b.id)).slice(0, limit);
 }
 
-function selectEvidence(chunks, lexical, limit = 10) {
-  const ranked = [...lexical];
-  const referencedInvoices = lexical.filter(chunk => chunk.type === 'invoice').slice(0, 2);
+function selectEvidence(chunks, lexical, question, limit = 10) {
+  const queryText = clean(question).toLowerCase();
+  const asksHistory = /\b(?:history|previous|prior|last|completed|archived|earlier)\b/.test(queryText);
+  const historicalTypes = new Set(['review_history', 'manual_resolution_history']);
+  const activeRanked = lexical.filter(chunk => !historicalTypes.has(chunk.type));
+  const hasActiveEvidence = activeRanked.some(chunk => chunk.type !== 'policy');
+  const ranked = [...(!asksHistory && hasActiveEvidence ? activeRanked : lexical)];
+  const referencedInvoices = ranked.filter(chunk => chunk.type === 'invoice').slice(0, 2);
   for (const invoice of referencedInvoices) {
     const customerTokens = tokens(invoice.customer || '').filter(token => token.length >= 3);
     const candidates = chunks.filter(chunk => chunk.type === 'bank' && Number(chunk.amountKobo) > 0).map(chunk => {
@@ -208,9 +239,40 @@ function selectEvidence(chunks, lexical, limit = 10) {
   const add = chunk => { if (chunk && !selected.some(item => item.id === chunk.id) && selected.length < limit) selected.push(chunk); };
   referencedInvoices.forEach(add);
   if (referencedInvoices.length) ranked.filter(chunk => chunk.type === 'bank').slice(0, 3).forEach(add);
-  ranked.filter(chunk => chunk.type !== 'policy').forEach(chunk => { if (selected.length < limit - 1) add(chunk); });
-  add(ranked.find(chunk => chunk.type === 'policy') || chunks.find(chunk => chunk.id === 'policy:KB-072'));
-  ranked.filter(chunk => chunk.type !== 'policy').forEach(add);
+  if (/\b(?:cash|cashbook|daybook|lodgement|deposit|cashier|batch|takings)\b/.test(queryText)) {
+    const batch = ranked.find(chunk => chunk.type === 'current_cash_batch');
+    add(batch);
+    if (batch) {
+      (batch.cashEntryIds || []).map(id => chunks.find(chunk => chunk.id === `cash:${id}`)).slice(0, 3).forEach(chunk => add(chunk && {
+        ...chunk, retrievalReason: `included in current ${batch.frequency || 'cash'} batch ${batch.ref}`,
+      }));
+      const batchBank = chunks.find(chunk => chunk.id === `bank:${batch.bankId}`);
+      add(batchBank && { ...batchBank, retrievalReason: `candidate bank row for current cash batch ${batch.ref}` });
+    } else {
+      ranked.filter(chunk => chunk.type === 'cashbook').slice(0, 3).forEach(add);
+      ranked.filter(chunk => chunk.type === 'bank').slice(0, 2).forEach(add);
+    }
+  }
+  if (/\b(?:stock|count|shortage|surplus|sku|inventory)\b/.test(queryText)) add(ranked.find(chunk => chunk.type === 'stock'));
+  if (asksHistory) {
+    add(ranked.find(chunk => chunk.type === 'review_history'));
+    add(ranked.find(chunk => chunk.type === 'manual_resolution_history'));
+  }
+  const typeCounts = new Map(selected.map(chunk => [chunk.type, selected.filter(item => item.type === chunk.type).length]));
+  for (const chunk of ranked.filter(item => item.type !== 'policy')) {
+    if (selected.length >= limit - 1) break;
+    const cap = chunk.type === 'bank' ? 3 : 4;
+    if ((typeCounts.get(chunk.type) || 0) >= cap) continue;
+    const before = selected.length;
+    add(chunk);
+    if (selected.length > before) typeCounts.set(chunk.type, (typeCounts.get(chunk.type) || 0) + 1);
+  }
+  const policy = ranked.find(chunk => chunk.type === 'policy') || chunks.find(chunk => chunk.id === 'policy:KB-072');
+  if (policy && !selected.some(chunk => chunk.type === 'policy') && selected.length >= limit) selected.pop();
+  add(policy);
+  ranked.filter(chunk => chunk.type !== 'policy').forEach(chunk => {
+    if (chunk.type !== 'bank' || selected.filter(item => item.type === 'bank').length < 3) add(chunk);
+  });
   return selected.slice(0, limit).map((chunk, index) => ({
     ...chunk,
     retrievalScore: Number((1 / (20 + index)).toFixed(5)),
@@ -324,7 +386,7 @@ export function createRagAgent({ apiKey = process.env.MODEL_API_KEY, fetcher = f
       const chunks = buildRagChunks(state);
       const sourceFingerprint = sha256(JSON.stringify(chunks.map(({ id, sourceHash, text }) => ({ id, sourceHash, text }))));
       const lexical = lexicalRetrieve(chunks, cleanedQuestion);
-      const selected = selectEvidence(chunks, lexical);
+      const selected = selectEvidence(chunks, lexical, cleanedQuestion);
       if (!selected.length) throw ragError('No relevant evidence was found in this workspace', 422);
       const result = await generator(cleanedQuestion, selected, sourceFingerprint, { apiKey, fetcher });
       result.retrieval = {
