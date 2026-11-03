@@ -28,14 +28,14 @@ Open the [hosted NaijaLedger app](https://naijaledger-793831462989.europe-west1.
 
 Recommended five-minute path:
 
-1. Review the seeded invoices, handwritten-style cashbook entries, bank credits, stock count, and visible demo allowances.
+1. Review the seeded invoices, handwritten-style cashbook entries, bank credits, stock count, and visible demo controls.
 2. In **Meta Smart Intake**, upload the three-file judge pack together: [`samples/01_handwritten_cashbook.png`](samples/01_handwritten_cashbook.png), [`samples/02_sales_note.txt`](samples/02_sales_note.txt), and [`samples/03_voice_note.wav`](samples/03_voice_note.wav). Select **Extract sales candidates**, inspect the live Muse model labels and provenance, correct any uncertain fields, confirm invoice versus cash sale, and commit only the reviewed rows. [`samples/README.txt`](samples/README.txt) explains the expected records.
 3. Ask the **NaijaLedger Evidence Agent** why `INV-002` is unresolved. Inspect the records and policy chunks retrieved before Muse Spark's answer, the exact citations, and the independent verification receipt.
 4. Approve an invoice match, then open **Cash Lodgement Desk** and approve one exact daily or weekly cash batch only after reading the teller/deposit-slip checkpoint.
 5. In **Stock Reconciliation**, change a physical count and observe the live shortage/surplus, then save it. Investigate **INV-002** in **Meta Evidence Lab** and inspect its cited brief.
 6. Download the PDF and Excel review packs. In **Review Trail**, complete a named review to archive its summary and open a clean source set; **Reset sample** restores the full Judge Demo without refreshing model allowances.
 
-Each anonymous workspace allows three Smart Intake extractions, five invoice investigations, and three Evidence Agent questions. A separate bounded public traffic limit protects the hosted Meta integration. The banner always labels synthetic data and remaining calls; normal Google workspaces remain private and unchanged. The repository still runs independently using the setup below.
+Smart Intake extractions are unlimited in each anonymous Judge Demo workspace. Five invoice investigations and three Evidence Agent questions remain available per workspace, while a separate bounded public traffic limit protects the hosted Meta integration. The banner always labels synthetic data and remaining calls; normal Google workspaces remain private and unchanged. The repository still runs independently using the setup below.
 
 ## What works
 
@@ -79,7 +79,7 @@ Smart Intake supports up to six files, 10 MB per file and 28 MB combined (30 MB 
 
 Files are processed only after the signed-in user clicks **Extract sales candidates**. Raw bytes are held in memory for that request and are not written to Firestore. Firestore retains the bounded draft, short transcript/text preview when applicable, extracted fields, source fingerprints, and audit history. Document content is treated as untrusted data, so instructions inside a document cannot override the extraction policy. A document extraction never becomes an invoice or cashbook row without the human commit checkpoint.
 
-Judge Demo uses the same verified backend and per-UID Firestore isolation as a normal workspace. Model allowances are consumed in Firestore transactions and survive sample resets. A separate hourly in-memory limit per running Cloud Run instance, keyed by trusted proxy address, bounds public demo model traffic. These controls are for a hackathon demonstration, not a general-purpose public multi-tenant billing system.
+Judge Demo uses the same verified backend and per-UID Firestore isolation as a normal workspace. Invoice-investigation and Evidence Agent allowances are consumed in Firestore transactions and survive sample resets; Smart Intake has no per-workspace extraction ceiling. A separate hourly in-memory limit per running Cloud Run instance, keyed by trusted proxy address, bounds public demo model traffic. These controls are for a hackathon demonstration, not a general-purpose public multi-tenant billing system.
 
 ## Architecture
 
@@ -117,3 +117,4 @@ If you already cloned it, run `git pull` in that checkout first. The script enab
 For Meta investigations, store `MODEL_API_KEY` in Google Secret Manager and attach it to the Cloud Run service as the `MODEL_API_KEY` environment variable. Grant the runtime identity access to that specific secret. Do not put the value in this script, Dockerfile, Git, or browser configuration. Deploying without the secret leaves reconciliation available and returns a configuration error for investigations.
 
 The production service is hosted at `https://naijaledger-793831462989.europe-west1.run.app/`. Deployment credentials and private keys are not stored in this repository.
+
