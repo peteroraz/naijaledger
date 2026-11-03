@@ -65,7 +65,7 @@ type Workspace = {
   closeBlockers: { invoiceProposals: number; cashProposals: number; unresolvedInvoices: number; unresolvedBank: number; unbankedCash: number; stockVariances: number; pendingDraft: number; pendingBriefs: number; pendingAgentAnswers: number; total: number };
   version: number; imports: Record<string, string>; briefs: Record<string, Brief>; agentAnswers: AgentAnswer[]; intakeDraft: IntakeDraft | null; updatedAt: string;
   audit: AuditEvent[];
-  demo: { isDemo: boolean; limits: { intake: number; investigate: number; agent: number }; usage: { intake: number; investigate: number; agent: number } };
+  demo: { isDemo: boolean; limits: { intake: number | null; investigate: number; agent: number }; usage: { intake: number; investigate: number; agent: number } };
 };
 type WorkspaceView = 'overview' | 'import' | 'reconcile' | 'evidence' | 'stock' | 'review';
 const workspaceViews: { id: WorkspaceView; label: string; shortLabel: string }[] = [
@@ -517,7 +517,7 @@ function Desk({ user }: { user: User }) {
       {data.demo.isDemo && <section className="demo-banner" aria-label="Judge Demo status">
         <div className="demo-emblem">✦</div>
         <div><small>JUDGE DEMO · ISOLATED SESSION</small><strong>Live Meta models. Synthetic business records.</strong><p>Nothing here belongs to a real business. Human review is still required.</p></div>
-        <div className="demo-allowances"><span><b>{Math.max(0, data.demo.limits.intake - data.demo.usage.intake)}</b> Smart Intake calls left</span><span><b>{Math.max(0, data.demo.limits.investigate - data.demo.usage.investigate)}</b> investigations left</span><span><b>{Math.max(0, data.demo.limits.agent - data.demo.usage.agent)}</b> Evidence Agent questions left</span></div>
+        <div className="demo-allowances"><span><b>{data.demo.limits.intake === null ? 'Unlimited' : Math.max(0, data.demo.limits.intake - data.demo.usage.intake)}</b> Smart Intake extractions{data.demo.limits.intake === null ? '' : ' left'}</span><span><b>{Math.max(0, data.demo.limits.investigate - data.demo.usage.investigate)}</b> investigations left</span><span><b>{Math.max(0, data.demo.limits.agent - data.demo.usage.agent)}</b> Evidence Agent questions left</span></div>
         <button className="quiet" disabled={!!busy} onClick={() => void resetDemo()}>{busy === 'demo-reset' ? 'Resetting…' : 'Reset sample'}</button>
       </section>}
       {activeView === 'overview' && <div className="workspace-panel" id="panel-overview" role="tabpanel" aria-label="Overview">
@@ -553,7 +553,7 @@ function Desk({ user }: { user: User }) {
           </div>
           <div className="typed-entry"><label htmlFor="typed-sales-entry"><strong>Type or paste sales / cashbook entries</strong><span>Example: “29 Oct — cash sales ₦18,500; cashier deposited the week’s takings on Friday.”</span></label><textarea id="typed-sales-entry" value={intakeText} disabled={!!busy} maxLength={20000} onChange={event => setIntakeText(event.target.value)} placeholder="Paste notes, copied messages, cashbook lines, or several sales entries here…"/><small>{intakeText.length.toLocaleString()} / 20,000 characters</small></div>
         </div>
-        <div className="intake-run"><p><strong>Meta processing:</strong> Muse Spark reads and classifies invoices versus cash sales. Voice notes are transcribed with Muse Voice first. Source hashes and confidence stay attached to every candidate.</p><button disabled={!!busy || (!intakeFiles.length && !intakeText.trim()) || (data.demo.isDemo && data.demo.usage.intake >= data.demo.limits.intake)} onClick={() => void analyzeIntake()}>{busy === 'intake-analyze' ? `Reading ${intakeFiles.length + (intakeText.trim() ? 1 : 0)} source${intakeFiles.length + (intakeText.trim() ? 1 : 0) === 1 ? '' : 's'}…` : data.demo.isDemo && data.demo.usage.intake >= data.demo.limits.intake ? 'Demo extraction limit reached' : 'Extract sales candidates'}</button></div>
+        <div className="intake-run"><p><strong>Meta processing:</strong> Muse Spark reads and classifies invoices versus cash sales. Voice notes are transcribed with Muse Voice first. Source hashes and confidence stay attached to every candidate.</p><button disabled={!!busy || (!intakeFiles.length && !intakeText.trim()) || (data.demo.isDemo && data.demo.limits.intake !== null && data.demo.usage.intake >= data.demo.limits.intake)} onClick={() => void analyzeIntake()}>{busy === 'intake-analyze' ? `Reading ${intakeFiles.length + (intakeText.trim() ? 1 : 0)} source${intakeFiles.length + (intakeText.trim() ? 1 : 0) === 1 ? '' : 's'}…` : data.demo.isDemo && data.demo.limits.intake !== null && data.demo.usage.intake >= data.demo.limits.intake ? 'Demo extraction limit reached' : 'Extract sales candidates'}</button></div>
         {data.intakeDraft && <section className="intake-review" aria-label="Extracted invoice review queue">
           <div className="review-banner"><div><small>REVIEW QUEUE · {new Date(data.intakeDraft.createdAt).toLocaleString('en-NG')}</small><h3>{data.intakeDraft.candidates.length} sales candidate{data.intakeDraft.candidates.length === 1 ? '' : 's'} from {data.intakeDraft.sources.length} source{data.intakeDraft.sources.length === 1 ? '' : 's'}</h3><p>Confirm whether each is an invoice or cash sale, correct uncertain fields, then add only reviewed rows.</p></div><span>{selectedDrafts.size} selected</span></div>
           <div className="source-strip">{data.intakeDraft.sources.map(source => <article className={source.status} key={source.id}><div><b>{source.status === 'extracted' ? '✓' : '!'} {source.name}</b><small>{source.type} · {source.sha256.slice(0, 10)}…</small></div><span>{source.status === 'extracted' ? `${source.entryCount} found` : 'Could not read'}</span>{source.status === 'failed' && <p>{source.error}</p>}{source.summary && <p>{source.summary}</p>}</article>)}</div>
@@ -618,3 +618,4 @@ function App() {
 }
 
 createRoot(document.getElementById('root')!).render(<React.StrictMode><App /></React.StrictMode>);
+
