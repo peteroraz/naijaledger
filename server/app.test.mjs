@@ -217,8 +217,9 @@ test('Judge Demo Smart Intake has no per-workspace extraction ceiling', async ()
       form.append('version', String(workspace.version));
       form.append('text', `Judge extraction attempt ${attempt}`);
       const response = await fetch(`${url}/api/intake/extract`, { method: 'POST', headers: { Authorization: 'Bearer judge' }, body: form });
-      assert.equal(response.status, 200, await response.text());
-      workspace = await response.json();
+      const body = await response.json();
+      assert.equal(response.status, 200, JSON.stringify(body));
+      workspace = body;
       assert.equal(workspace.demo.usage.intake, 0);
     }
     assert.equal(extractionCalls, 4);
