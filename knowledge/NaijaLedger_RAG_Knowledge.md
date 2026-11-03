@@ -1,10 +1,26 @@
 # NaijaLedger Evidence Agent Knowledge Base
 
-Version: 1.0
-Updated: 2026-10-31
+Version: 1.1
+Updated: 2026-11-03
 Currency: Nigerian naira (NGN)
 
-This resource supports retrieval and explanation. It never authorizes the agent to approve a payment match, deposit match, stock adjustment, write-off, or tax treatment.
+This is a curated operational policy for the NaijaLedger hackathon prototype. It supports retrieval and explanation; it is not accounting, audit, legal, or tax advice. It does not replace original records, professional judgement, or statutory record-retention duties. It never authorizes the agent to approve a payment match, deposit match, stock adjustment, write-off, or tax treatment.
+
+### Judge verification matrix
+
+| Judge question | Expected evidence | Governing policy |
+| --- | --- | --- |
+| Why is INV-002 unresolved? | `invoice:INV-002`, relevant bank rows, exact source locators and fingerprints | KB-032, KB-034, KB-081 |
+| Which cash takings support a lodgement? | Cashbook rows, a current cash-batch proposal, and the candidate bank row | KB-031, KB-032, KB-034 |
+| Why does RICE-50 have a variance? | `stock:RICE-50` with the visible expected and counted quantity calculation | KB-043, KB-046 |
+| What happened in a completed review? | Archived review summary and commented resolutions, retrieved only for a history question | KB-060, KB-071 |
+
+### Reference context
+
+- Financial Reporting Council of Nigeria, *SME Corporate Governance Guidelines 2024*: https://frcnigeria.gov.ng/wp-content/uploads/2024/07/SMECorporateGovernanceGuidelines2024-3_compressed-2-1.pdf
+- Federal Inland Revenue Service, *Finance Act 2020*: https://atrs.firs.gov.ng/uploads/finance-act-2020_signed.pdf
+
+These public sources are background context, not a compliance certification. Nigeria's Finance Act contains a six-year recordkeeping requirement for relevant books and records; a production deployment requires professional confirmation of its scope and any other applicable duties.
 
 ## KB-001: Operating principles
 
@@ -28,7 +44,7 @@ Expected closing cash = opening cash + cash sales + other cash received - cash e
 
 Cash variance = counted closing cash - expected closing cash.
 
-A positive variance means counted cash is higher than expected. A negative variance means a shortage. Report the amount and request investigation; never assign blame or invent a reason.
+A positive variance means counted cash is higher than expected. A negative variance means a shortage. Calculate either figure only when every component is present in cited source records; otherwise name the missing inputs. Report a supported amount and request investigation; never assign blame or invent a reason.
 
 ## KB-031: Daily or weekly cash lodgement
 
@@ -36,13 +52,15 @@ A cashier may deposit one day's takings or combine several days. A cash batch re
 
 Expected deposit = included cash receipts - cash refunds - permitted cash expenses - retained float - other documented deductions.
 
+Calculate an expected deposit only when every component is present in cited source records. The current prototype proposes only unambiguous exact daily or weekly cashbook totals matched to one bank credit within the configured date window; any deduction or more complex allocation remains unresolved for human investigation.
+
 ## KB-032: Candidate bank deposit
 
 A bank credit is a candidate when its date is on or shortly after the batch, its amount equals the expected deposit or has a documented difference, its narration or teller reference supports the link, and it is not already allocated. Exact amount or name similarity is evidence, not proof.
 
 ## KB-033: Split and combined deposits
 
-One cash batch may be deposited through several bank credits, and one credit may combine several cash batches. Propose combinations only when sums, dates, and references are traceable. State every contributing source ID.
+In real operations, one cash batch may be deposited through several bank credits, and one credit may combine several cash batches. The current prototype does not automatically allocate these patterns. Muse may describe a split or combined deposit only as an unverified investigation hypothesis when sums, dates, and references are traceable. It must state every contributing source ID, keep the records unresolved, and request human verification.
 
 ## KB-034: Deposit variance
 
@@ -60,7 +78,7 @@ A positive variance means more stock was counted; a negative variance means fewe
 
 ## KB-044: Linking sales to stock
 
-When a sales source includes SKU, item, and quantity, propose a stock issue linked to that transaction. When only an amount is known, do not infer product quantities without a reliable price list and human review.
+When a sales source includes SKU, item, and quantity, a human may review it alongside the stock record as possible support for a stock issue. The current prototype does not automatically create, link, or post stock issues from sales. When only an amount is known, do not infer product quantities without a reliable price list and human review.
 
 ## KB-046: Stock variance review
 
@@ -68,11 +86,11 @@ Review purchases, sales, returns, damage, transfers, unit conversion, count cuto
 
 ## KB-050: Source provenance
 
-Each source should retain its ID, type, filename or capture label, SHA-256 fingerprint, page or row locator, ingestion time, extracted fields, confidence, and audited reviewer corrections. RAG answers distinguish source evidence from interpretation.
+Each source should retain its ID, type, filename or capture label, SHA-256 fingerprint, page or row locator, ingestion time, extracted fields, confidence, and audited reviewer corrections. A SHA-256 fingerprint is a provenance and integrity aid; it is not the original evidence and does not prove that the source was correct when captured. RAG answers distinguish source evidence from interpretation.
 
 ## KB-060: Review cycles
 
-A review cycle groups invoices, bank rows, cashbook entries, cash batches, stock records, decisions, and evidence for one period. Completing a cycle archives its summary and fingerprints before clearing the active working set. Completed history must remain available to retrieval.
+A review cycle groups invoices, bank rows, cashbook entries, cash batches, stock records, decisions, and evidence for one period. Completing a cycle archives normalized source rows, approved and rejected decisions, reviewer comments, verification receipts, fingerprints, and audit events before clearing the active working set. The prototype retains a bounded maximum of 12 completed reviews for product continuity; it is not a statutory archive or system of record. Keep original business records separately for the legally required period and obtain professional advice on the rules that apply to the business.
 
 ## KB-071: Retrieval order
 
