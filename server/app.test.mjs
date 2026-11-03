@@ -442,53 +442,29 @@ test('cash lodgements, stock counts, and completed review history are versioned 
     assert.equal(stock.status, 200, JSON.stringify(stock.data));
     assert.equal(stock.data.stockReview.summary.varianceItems, 0);
 
-    const blocked = await request('/review-cycles/complete', { title: 'October 2026 close', version: stock.data.version });
-    assert.equal(blocked.status, 400);
-    assert.match(blocked.data.error, /Resolve all review items first/);
+    const missingComment = await request('/review-cycles/complete', { title: 'October 2026 close', version: stock.data.version });
+    assert.equal(missingComment.status, 400);
+    assert.match(missingComment.data.error, /closing comment/i);
     const uncommented = await request('/resolutions', { kind: 'invoice', recordId: stock.data.unresolvedInvoices[0].id, comment: ' ', version: stock.data.version });
     assert.equal(uncommented.status, 400);
     assert.match(uncommented.data.error, /review comment/i);
-
-    let workspace = stock.data;
-    while (workspace.proposals.length) {
-      const proposal = workspace.proposals[0];
-      const approved = await request('/approvals', { invoiceId: proposal.invoiceId, bankId: proposal.bankId, version: workspace.version });
-      assert.equal(approved.status, 200, JSON.stringify(approved.data));
-      workspace = approved.data;
-    }
-    while (workspace.cashReview.proposals.length) {
-      const proposal = workspace.cashReview.proposals[0];
-      const approved = await request('/cash-deposits', { cashEntryIds: proposal.cashEntryIds, bankId: proposal.bankId, version: workspace.version });
-      assert.equal(approved.status, 200, JSON.stringify(approved.data));
-      workspace = approved.data;
-    }
-    while (workspace.unresolvedInvoices.length) {
-      const record = workspace.unresolvedInvoices[0];
-      const resolved = await request('/resolutions', { kind: 'invoice', recordId: record.id, comment: 'Reviewed supporting sales records and approved this exception for period close.', version: workspace.version });
-      assert.equal(resolved.status, 200, JSON.stringify(resolved.data));
-      workspace = resolved.data;
-    }
-    while (workspace.unresolvedBank.length) {
-      const record = workspace.unresolvedBank[0];
-      const resolved = await request('/resolutions', { kind: 'bank', recordId: record.id, comment: 'Reviewed the bank narration and source evidence; classification is documented.', version: workspace.version });
-      assert.equal(resolved.status, 200, JSON.stringify(resolved.data));
-      workspace = resolved.data;
-    }
-    assert.equal(workspace.closeBlockers.total, 0);
-    assert.ok(workspace.manualResolutions.length > 0);
-    assert.equal(workspace.manualResolutions[0].reviewer.displayName, 'Alice Reviewer');
-    assert.equal(workspace.audit.at(-1).actor.email, 'alice@example.com');
-    assert.ok(workspace.totals.manualReviewedKobo !== 0);
-    assert.equal(workspace.totals.reconciledKobo, workspace.totals.approvedKobo + workspace.cashReview.totals.bankedCashKobo);
-
-    const completed = await request('/review-cycles/complete', { title: 'October 2026 close', version: workspace.version });
+    const workspace = stock.data;
+    assert.ok(workspace.closeBlockers.total > 0, 'fixture must retain unresolved and unreconciled entries');
+    const closingComment = 'Period closed for month-end reporting; unresolved items remain open for follow-up in the audit history.';
+    const completed = await request('/review-cycles/complete', { title: 'October 2026 close', comment: closingComment, version: workspace.version });
     assert.equal(completed.status, 200, JSON.stringify(completed.data));
     assert.equal(completed.data.reviewHistory.length, 1);
     assert.ok(completed.data.reviewHistory[0].results.approvedCashDeposits >= 1);
-    assert.equal(completed.data.reviewHistory[0].results.manualResolutions, workspace.manualResolutions.length);
+    assert.equal(completed.data.reviewHistory[0].closure.status, 'closed_with_open_items');
+    assert.equal(completed.data.reviewHistory[0].closure.comment, closingComment);
+    assert.equal(completed.data.reviewHistory[0].closure.openItemCount, workspace.closeBlockers.total);
+    assert.equal(completed.data.reviewHistory[0].closure.openItems.unresolvedInvoices.length, workspace.unresolvedInvoices.length);
+    assert.equal(completed.data.reviewHistory[0].closure.openItems.unresolvedBank.length, workspace.unresolvedBank.length);
+    assert.equal(completed.data.reviewHistory[0].results.manualResolutions, 0);
     assert.equal(completed.data.reviewHistory[0].totals.reconciledKobo, workspace.totals.reconciledKobo);
     assert.equal(completed.data.reviewHistory[0].completedBy.email, 'alice@example.com');
     assert.equal(completed.data.reviewHistory[0].audit.at(-1).action, 'review-cycle-completed');
+    assert.equal(completed.data.reviewHistory[0].audit.at(-1).comment, closingComment);
     assert.equal(completed.data.invoices.length, 0);
     assert.equal(completed.data.bank.length, 0);
     assert.equal(completed.data.cashbook.length, 0);
@@ -500,4 +476,5 @@ test('cash lodgements, stock counts, and completed review history are versioned 
     assert.equal(nextPeriod.data.reviewHistory.length, 1, 'starting a new period must preserve completed review history');
   } finally { await new Promise(resolve => server.close(resolve)); }
 });
+
 

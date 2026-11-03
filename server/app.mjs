@@ -529,17 +529,31 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
   }));
   app.post('/api/review-cycles/complete', route(async (req, res) => {
     const title = String(req.body?.title || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+    const comment = String(req.body?.comment || '').replace(/\s+/g, ' ').trim().slice(0, 1000);
     if (!title) return res.status(400).json({ error: 'Name the completed review period' });
+    if (comment.length < 10) return res.status(400).json({ error: 'Add a closing comment of at least 10 characters explaining the period outcome and any open issues' });
     const state = await store.change(req.uid, req.body?.version, current => {
       const review = calculateReview(current);
-      if (review.closeBlockers.total > 0) {
-        const error = new Error(`Resolve all review items first: ${review.closeBlockers.unresolvedInvoices} invoice exceptions, ${review.closeBlockers.unresolvedBank} bank exceptions, ${review.closeBlockers.invoiceProposals + review.closeBlockers.cashProposals} match proposals, ${review.closeBlockers.unbankedCash} unbanked cash entries, ${review.closeBlockers.stockVariances} stock variances, ${review.closeBlockers.pendingDraft + review.closeBlockers.pendingBriefs + review.closeBlockers.pendingAgentAnswers} pending evidence reviews remain`);
-        error.status = 400;
-        throw error;
-      }
+      const pendingEvidence = [
+        ...(current.intakeDraft ? [{ type: 'intake draft', reference: current.intakeDraft.id, detail: `${current.intakeDraft.candidates?.length || 0} candidate records awaiting review` }] : []),
+        ...Object.entries(current.briefs || {}).filter(([, brief]) => brief.verification?.humanReview?.status !== 'reviewed').map(([invoiceId]) => ({ type: 'Meta brief', reference: invoiceId, detail: 'Human checkpoint pending' })),
+        ...(current.agentAnswers || []).filter(answer => answer.verification?.humanReview?.status !== 'reviewed').map(answer => ({ type: 'Evidence Agent answer', reference: answer.createdAt, detail: answer.question })),
+      ];
+      const openItems = {
+        invoiceProposals: review.invoiceReview.proposals,
+        cashProposals: review.cashReview.proposals,
+        unresolvedInvoices: review.invoiceReview.unresolvedInvoices,
+        unresolvedBank: review.unresolvedBank,
+        unbankedCash: review.cashReview.unbankedCash,
+        stockVariances: review.unresolvedStock,
+        pendingEvidence,
+      };
+      const openItemCount = Object.values(openItems).reduce((total, rows) => total + rows.length, 0);
+      const closureStatus = openItemCount > 0 ? 'closed_with_open_items' : 'fully_reconciled';
+      const closure = { status: closureStatus, comment, openItemCount, openItems };
       const completedAt = new Date().toISOString();
-      audit(current, { action: 'review-cycle-completed', at: completedAt, title, by: req.uid, actor: req.actor });
-      const snapshot = reviewCycleSnapshot(current, title, completedAt, req.actor);
+      audit(current, { action: 'review-cycle-completed', at: completedAt, title, comment, openItemCount, closureStatus, by: req.uid, actor: req.actor });
+      const snapshot = reviewCycleSnapshot(current, title, completedAt, req.actor, closure);
       current.reviewHistory = [...(current.reviewHistory || []), snapshot].slice(-12);
       current.invoices = []; current.bank = []; current.cashbook = []; current.stock = [];
       current.approved = []; current.cashAllocations = []; current.rejectedProposals = []; current.manualResolutions = []; current.briefs = {}; current.agentAnswers = []; current.intakeDraft = null; current.imports = {};
@@ -633,4 +647,5 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
   });
   return app;
 }
+
 

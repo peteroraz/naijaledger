@@ -42,7 +42,11 @@ test('completed review snapshot keeps reconstructable source rows and decision e
     { kind: 'cash', recordId: 'CASH-003', amountKobo: 2_800_000, comment: 'Cash retained in till', reviewedAt: '2026-10-30T09:05:00.000Z', reviewer: { uid: 'alice', displayName: 'Alice Reviewer' } },
   ];
   state.audit = [{ action: 'exception-resolved', invoiceId: 'INV-002', at: '2026-10-30T09:00:00.000Z' }];
-  const snapshot = reviewCycleSnapshot(state, 'October close', '2026-10-30T10:00:00.000Z', { uid: 'alice', displayName: 'Alice Reviewer' });
+  const closure = {
+    status: 'closed_with_open_items', comment: 'Unresolved records retained for follow-up.', openItemCount: 1,
+    openItems: { invoiceProposals: [], cashProposals: [], unresolvedInvoices: [state.invoices[1]], unresolvedBank: [], unbankedCash: [], stockVariances: [], pendingEvidence: [] },
+  };
+  const snapshot = reviewCycleSnapshot(state, 'October close', '2026-10-30T10:00:00.000Z', { uid: 'alice', displayName: 'Alice Reviewer' }, closure);
   assert.equal(snapshot.counts.cashbook, 5);
   assert.equal(snapshot.totals.approvedInvoiceKobo, 12_000_000);
   assert.equal(snapshot.totals.bankedCashKobo, 6_300_000);
@@ -54,8 +58,12 @@ test('completed review snapshot keeps reconstructable source rows and decision e
   assert.equal(snapshot.manualResolutions[0].comment, 'Reviewed');
   assert.equal(snapshot.audit[0].action, 'exception-resolved');
   assert.equal(snapshot.completedBy.displayName, 'Alice Reviewer');
+  assert.equal(snapshot.closure.status, 'closed_with_open_items');
+  assert.equal(snapshot.closure.openItemCount, 1);
+  assert.equal(snapshot.closure.openItems.unresolvedInvoices[0].id, state.invoices[1].id);
   assert.equal(snapshot.bank.length, state.bank.length);
   assert.equal(snapshot.invoices.length, state.invoices.length);
   assert.equal(snapshot.approved[0].invoiceId, 'INV-001');
   assert.equal(snapshot.cashAllocations[0].bankId, 'BNK-008');
 });
+

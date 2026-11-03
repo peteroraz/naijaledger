@@ -67,7 +67,7 @@ test('review pack PDF is a complete printable document', async () => {
   assert.match(file.toString('latin1'), /\/MediaBox \[0 0 841\.89 595\.28\]/);
 });
 
-test('review pack Excel workbook preserves source, review, verification, and audit tables', async () => {
+test('review report Excel workbook is compact and preserves open issues, decisions, evidence, and audit history', async () => {
   const report = createReviewPack(reviewedState(), '2026-10-29T14:20:00.000Z');
   const file = await buildReviewWorkbook(report);
   assert.ok(Buffer.isBuffer(file));
@@ -76,20 +76,15 @@ test('review pack Excel workbook preserves source, review, verification, and aud
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(file);
   assert.deepEqual(workbook.worksheets.map(sheet => sheet.name), [
-    'Summary', 'Approved Matches', 'Unresolved Invoices', 'Unresolved Bank', 'Manual Resolutions', 'Rejected Proposals',
-    'Sales Invoices', 'Bank Transactions', 'Cashbook', 'Cash Deposits', 'Stock Reconciliation', 'Review History', 'Archived Sources', 'Archived Decisions',
-    'AI Briefs', 'Evidence Agent', 'Verification Checks', 'Audit Trail',
+    'Summary', 'Open Issues', 'Reconciled', 'Period History', 'Source Records', 'Decisions', 'AI Evidence', 'Audit Trail',
   ]);
-  assert.equal(workbook.getWorksheet('Summary').getCell('A1').value, 'NaijaLedger review pack');
-  assert.equal(workbook.getWorksheet('Approved Matches').getCell('A2').value, 'INV-001');
-  assert.equal(workbook.getWorksheet('Manual Resolutions').getCell('D2').value, 'INV-002');
-  assert.equal(workbook.getWorksheet('Manual Resolutions').getCell('H2').value, 'Test Reviewer');
-  assert.equal(workbook.getWorksheet('Rejected Proposals').getCell('A2').value, 'rejection-test');
-  assert.equal(workbook.getWorksheet('Rejected Proposals').getCell('G2').value, 'Remittance reference names a different customer.');
-  assert.equal(workbook.getWorksheet('Cash Deposits').getCell('A2').value, 'Approved');
-  assert.equal(workbook.getWorksheet('Stock Reconciliation').getCell('A2').value, 'RICE-50');
-  assert.equal(workbook.getWorksheet('AI Briefs').getCell('A2').value, 'INV-002');
-  assert.match(String(workbook.getWorksheet('Evidence Agent').getCell('B2').value), /INV-002/);
-  assert.equal(workbook.getWorksheet('Verification Checks').getCell('D2').value, 'Passed');
+  assert.equal(workbook.getWorksheet('Summary').getCell('A1').value, 'NaijaLedger review report');
+  assert.ok(workbook.getWorksheet('Open Issues').rowCount > 1);
+  assert.equal(workbook.getWorksheet('Reconciled').getCell('B2').value, 'Invoice match');
+  assert.equal(workbook.getWorksheet('Decisions').getCell('C2').value, 'INV-002');
+  assert.equal(workbook.getWorksheet('Decisions').getCell('F2').value, 'Test Reviewer');
+  assert.equal(workbook.getWorksheet('AI Evidence').getCell('B2').value, 'Meta evidence brief');
+  assert.equal(workbook.getWorksheet('AI Evidence').getCell('C2').value, 'INV-002');
   assert.equal(workbook.getWorksheet('Audit Trail').rowCount, 4);
 });
+

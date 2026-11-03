@@ -76,7 +76,7 @@ export function reconcileStock(rows = []) {
   return { items, summary: { totalItems: items.length, balancedItems: items.filter(row => row.status === 'balanced').length, varianceItems: items.filter(row => row.status !== 'balanced').length } };
 }
 
-export function reviewCycleSnapshot(state, title, completedAt = new Date().toISOString(), completedBy = null) {
+export function reviewCycleSnapshot(state, title, completedAt = new Date().toISOString(), completedBy = null, closure = null) {
   const resolvedCashIds = (state.manualResolutions || []).filter(row => row.kind === 'cash').map(row => row.recordId);
   const cash = reconcileCashbook(state.cashbook || [], state.bank || [], state.cashAllocations || [], [], resolvedCashIds);
   const stock = reconcileStock(state.stock || []);
@@ -87,9 +87,15 @@ export function reviewCycleSnapshot(state, title, completedAt = new Date().toISO
   const approvedInvoiceKobo = (state.approved || []).reduce((total, allocation) => total + Number(state.invoices.find(row => row.id === allocation.invoiceId)?.amountKobo || 0), 0);
   const reconciledKobo = approvedInvoiceKobo + cash.totals.bankedCashKobo;
   const ledgerReviewedKobo = reconciledKobo + manualReviewedInvoiceKobo + manualReviewedCashKobo;
+  const closureSnapshot = closure ? structuredClone(closure) : {
+    status: 'fully_reconciled',
+    comment: 'Period closed after review.',
+    openItemCount: 0,
+    openItems: { invoiceProposals: [], cashProposals: [], unresolvedInvoices: [], unresolvedBank: [], unbankedCash: [], stockVariances: [], pendingEvidence: [] },
+  };
   return {
     id: `review-${completedAt.replace(/\D/g, '').slice(0, 14)}-${randomUUID().slice(0, 8)}`,
-    title, startedAt: state.reviewCycle?.startedAt || state.updatedAt, completedAt, completedBy,
+    title, startedAt: state.reviewCycle?.startedAt || state.updatedAt, completedAt, completedBy, closure: closureSnapshot,
     sourceHashes: { ...(state.imports || {}) },
     counts: { invoices: state.invoices.length, bank: state.bank.length, cashbook: (state.cashbook || []).length, stock: stock.items.length },
     totals: {
@@ -117,3 +123,4 @@ export function reviewCycleSnapshot(state, title, completedAt = new Date().toISO
     audit: structuredClone(state.audit || []),
   };
 }
+

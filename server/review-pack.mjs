@@ -90,10 +90,98 @@ export function createReviewPack(state, generatedAt = new Date().toISOString()) 
     rejectedProposals: state.rejectedProposals || [],
     stockReview: reconcileStock(state.stock || []),
     reviewCycle: state.reviewCycle || null, reviewHistory,
-    briefs: state.briefs || {}, agentAnswers: state.agentAnswers || [],
+    briefs: state.briefs || {}, agentAnswers: state.agentAnswers || [], intakeDraft: state.intakeDraft || null,
     audit: allAudit,
     updatedAt: state.updatedAt,
   };
+}
+
+const reviewerName = reviewer => reviewer?.displayName || reviewer?.email || reviewer?.uid || '';
+const closureLabel = closure => closure?.status === 'closed_with_open_items' ? 'Closed with open items' : 'Fully reconciled';
+
+function openIssueRows(report) {
+  const rows = [];
+  const add = (period, status, type, record, date, detail, amountKobo, nextAction = '') => rows.push({ period, status, type, record, date, detail, amount: amountKobo == null ? null : amount(amountKobo), nextAction });
+  const addSet = (period, status, items = {}) => {
+    for (const row of items.unresolvedInvoices || []) add(period, status, 'Unresolved invoice', row.id, row.date, row.customer || '', row.amountKobo, 'No approved bank match at close');
+    for (const row of items.unresolvedBank || []) add(period, status, 'Unresolved bank entry', row.id, row.date, row.description || '', row.amountKobo, 'No approved sales or cash allocation at close');
+    for (const row of items.unbankedCash || []) add(period, status, 'Unbanked cash', row.id, row.date, `${row.customer || ''}${row.description ? ` · ${row.description}` : ''}`, row.amountKobo, 'Cash receipt had no approved lodgement at close');
+    for (const row of items.stockVariances || []) add(period, status, 'Stock variance', row.sku, '', `${row.item || ''} · expected ${row.expectedQty ?? ''}, counted ${row.countedQty ?? ''}`, null, `Variance ${row.varianceQty ?? 0} ${row.unit || ''}`);
+    for (const row of items.invoiceProposals || []) add(period, status, 'Unapproved invoice proposal', `${row.invoiceId} <-> ${row.bankId}`, '', row.reason || '', row.amountKobo, 'Suggested match was not approved');
+    for (const row of items.cashProposals || []) add(period, status, 'Unapproved cash proposal', `${(row.cashEntryIds || []).join(', ')} -> ${row.bankId}`, `${row.startDate || ''}${row.endDate && row.endDate !== row.startDate ? ` to ${row.endDate}` : ''}`, row.reason || '', row.amountKobo, 'Suggested lodgement was not approved');
+    for (const row of items.pendingEvidence || []) add(period, status, 'Pending evidence checkpoint', row.reference || '', '', `${row.type || 'Evidence'} · ${row.detail || ''}`, null, 'Human checkpoint was pending at close');
+  };
+  addSet(report.reviewCycle?.title || 'Current review', 'Open in active review', {
+    unresolvedInvoices: report.unresolvedInvoices,
+    unresolvedBank: report.unresolvedBank,
+    unbankedCash: report.cashReview.unbankedCash,
+    stockVariances: report.stockReview.items.filter(row => row.status !== 'balanced' && !report.manualResolutions.some(resolution => resolution.kind === 'stock' && resolution.recordId === row.sku)),
+    invoiceProposals: report.proposals,
+    cashProposals: report.cashReview.proposals,
+    pendingEvidence: [
+      ...(report.intakeDraft ? [{ type: 'intake draft', reference: report.intakeDraft.id, detail: `${report.intakeDraft.candidates?.length || 0} candidate records awaiting review` }] : []),
+      ...Object.entries(report.briefs || {}).filter(([, brief]) => brief.verification?.humanReview?.status !== 'reviewed').map(([invoiceId]) => ({ type: 'Meta brief', reference: invoiceId, detail: 'Human checkpoint pending' })),
+      ...(report.agentAnswers || []).filter(answer => answer.verification?.humanReview?.status !== 'reviewed').map(answer => ({ type: 'Evidence Agent answer', reference: answer.createdAt, detail: answer.question })),
+    ],
+  });
+  for (const review of report.reviewHistory || []) addSet(review.title, closureLabel(review.closure), review.closure?.openItems || {});
+  return rows;
+}
+
+function reconciledRows(report) {
+  const rows = [];
+  const addPeriod = (period, invoices, bank, approved, cashAllocations) => {
+    const invoiceById = new Map((invoices || []).map(row => [row.id, row]));
+    const bankById = new Map((bank || []).map(row => [row.id, row]));
+    for (const match of approved || []) {
+      const invoice = invoiceById.get(match.invoiceId);
+      const credit = bankById.get(match.bankId);
+      rows.push({ period, type: 'Invoice match', sourceRecords: `${match.invoiceId} <-> ${match.bankId}`, party: invoice?.customer || '', amount: amount(invoice?.amountKobo || 0), reviewedAt: dateValue(match.reviewedAt), reviewer: reviewerName(match.reviewer) || match.reviewedBy || '', evidence: credit?.description || '' });
+    }
+    for (const allocation of cashAllocations || []) {
+      const credit = bankById.get(allocation.bankId);
+      rows.push({ period, type: 'Cash lodgement', sourceRecords: `${(allocation.cashEntryIds || []).join(', ')} -> ${allocation.bankId}`, party: '', amount: amount(credit?.amountKobo || 0), reviewedAt: dateValue(allocation.reviewedAt), reviewer: reviewerName(allocation.reviewer) || allocation.reviewedBy || '', evidence: credit?.description || allocation.frequency || '' });
+    }
+  };
+  addPeriod(report.reviewCycle?.title || 'Current review', report.invoices, report.bank, report.approved, report.cashAllocations);
+  for (const review of report.reviewHistory || []) addPeriod(review.title, review.invoices, review.bank, review.approved, review.cashAllocations);
+  return rows;
+}
+
+function sourceRows(report) {
+  const rows = [];
+  const addPeriod = (period, review) => {
+    for (const row of review.invoices || []) rows.push({ period, type: 'Invoice', id: row.id, date: dateValue(row.date), party: row.customer || '', description: row.description || '', amount: amount(row.amountKobo), sourceRow: row.sourceRow, sourceHash: row.sourceHash || review.sourceHashes?.invoices || '' });
+    for (const row of review.bank || []) rows.push({ period, type: 'Bank', id: row.id, date: dateValue(row.date), party: '', description: row.description || '', amount: amount(row.amountKobo), sourceRow: row.sourceRow, sourceHash: review.sourceHashes?.bank || '' });
+    for (const row of review.cashbook || []) rows.push({ period, type: 'Cashbook', id: row.id, date: dateValue(row.date), party: row.customer || '', description: row.description || '', amount: amount(row.amountKobo), sourceRow: row.sourceRow, sourceHash: row.sourceHash || review.sourceHashes?.cashbook || '' });
+    for (const row of review.stock || []) rows.push({ period, type: 'Stock', id: row.sku, date: null, party: row.item || '', description: `${row.unit || ''} · opening ${row.openingQty}; received ${row.receivedQty}; sold ${row.soldQty}; adjustment ${row.adjustmentQty}; counted ${row.countedQty}`, amount: null, sourceRow: row.sourceRow, sourceHash: review.sourceHashes?.stock || '' });
+  };
+  addPeriod(report.reviewCycle?.title || 'Current review', { invoices: report.invoices, bank: report.bank, cashbook: report.cashbook, stock: report.stockReview.items, sourceHashes: report.sourceHashes });
+  for (const review of report.reviewHistory || []) addPeriod(review.title, review);
+  return rows;
+}
+
+function decisionRows(report) {
+  const rows = [];
+  const addPeriod = (period, review) => {
+    for (const row of review.manualResolutions || []) rows.push({ period, type: `${row.kind} reviewed by comment`, records: row.recordId, amount: amount(row.amountKobo), decisionAt: dateValue(row.reviewedAt), reviewer: reviewerName(row.reviewer), comment: row.comment });
+    for (const row of review.rejectedProposals || []) rows.push({ period, type: `${row.kind} proposal rejected`, records: row.invoiceId || (row.cashEntryIds || []).join(', '), amount: amount(row.amountKobo), decisionAt: dateValue(row.rejectedAt), reviewer: reviewerName(row.reviewer), comment: row.comment });
+    if (review.closure) rows.push({ period, type: closureLabel(review.closure), records: `${review.closure.openItemCount || 0} open items`, amount: null, decisionAt: dateValue(review.completedAt), reviewer: reviewerName(review.completedBy), comment: review.closure.comment });
+  };
+  addPeriod(report.reviewCycle?.title || 'Current review', report);
+  for (const review of report.reviewHistory || []) addPeriod(review.title, review);
+  return rows;
+}
+
+function aiEvidenceRows(report) {
+  const rows = [];
+  const addPeriod = (period, review) => {
+    for (const [invoiceId, brief] of Object.entries(review.briefs || {})) rows.push({ period, type: 'Meta evidence brief', reference: invoiceId, createdAt: dateValue(brief.createdAt), model: brief.model, status: brief.verification?.humanReview?.status || 'pending', summary: brief.summary, fingerprint: brief.sourceFingerprint });
+    for (const answer of review.agentAnswers || []) rows.push({ period, type: 'Evidence Agent answer', reference: answer.question, createdAt: dateValue(answer.createdAt), model: answer.model, status: answer.verification?.humanReview?.status || 'pending', summary: answer.finding, fingerprint: answer.sourceFingerprint });
+  };
+  addPeriod(report.reviewCycle?.title || 'Current review', report);
+  for (const review of report.reviewHistory || []) addPeriod(review.title, review);
+  return rows;
 }
 
 function styleWorksheet(sheet, widths = {}) {
@@ -130,7 +218,7 @@ function addRowsSheet(workbook, name, columns, rows, widths = {}) {
   return sheet;
 }
 
-export async function buildReviewWorkbook(report) {
+async function buildLegacyReviewWorkbook(report) {
   const workbook = new ExcelJS.Workbook();
   workbook.creator = 'NaijaLedger';
   workbook.company = 'NaijaLedger';
@@ -395,6 +483,102 @@ export async function buildReviewWorkbook(report) {
   return Buffer.from(await workbook.xlsx.writeBuffer());
 }
 
+export async function buildReviewWorkbook(report) {
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = 'NaijaLedger';
+  workbook.company = 'NaijaLedger';
+  workbook.subject = 'Sales-to-bank reconciliation review report';
+  workbook.title = 'NaijaLedger review report';
+  workbook.created = new Date(report.generatedAt);
+  workbook.modified = new Date(report.generatedAt);
+
+  const issues = openIssueRows(report);
+  const activePeriod = report.reviewCycle?.title || 'Current review';
+  const activeIssues = issues.filter(row => row.period === activePeriod && row.status === 'Open in active review');
+  const archivedIssues = issues.length - activeIssues.length;
+  const summary = workbook.addWorksheet('Summary', { properties: { tabColor: { argb: `FF${GREEN}` } }, views: [{ showGridLines: false }] });
+  summary.columns = [{ key: 'a', width: 29 }, { key: 'b', width: 32 }, { key: 'c', width: 29 }, { key: 'd', width: 42 }];
+  summary.mergeCells('A1:D1'); summary.getCell('A1').value = 'NaijaLedger review report';
+  summary.getCell('A1').font = { name: 'Arial', size: 18, bold: true, color: { argb: `FF${GREEN}` } }; summary.getRow(1).height = 34;
+  summary.mergeCells('A2:D2'); summary.getCell('A2').value = 'Human-reviewed reconciliation evidence. Open items are disclosed and are not treated as reconciled.';
+  summary.getCell('A2').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: `FF${AMBER}` } }; summary.getCell('A2').font = { name: 'Arial', size: 10, bold: true, color: { argb: 'FF7A5421' } }; summary.getCell('A2').alignment = { wrapText: true, vertical: 'middle' }; summary.getRow(2).height = 30;
+  summary.addRow([]);
+  summary.addRow(['Current period', activePeriod, 'Generated', dateValue(report.generatedAt)]);
+  summary.addRow(['Reconciled value', amount(report.totals.reconciledKobo), 'Ledger-reviewed sales', amount(report.totals.ledgerReviewedKobo)]);
+  summary.addRow(['Approved invoice matches', report.matches.length, 'Approved cash lodgements', report.cashReview.matches.length]);
+  summary.addRow(['Open items in active period', activeIssues.length, 'Open items preserved in history', archivedIssues]);
+  summary.addRow(['Invoices / bank / cash / stock', `${report.invoices.length} / ${report.bank.length} / ${report.cashbook.length} / ${report.stockReview.items.length}`, 'Completed periods', report.reviewHistory.length]);
+  summary.addRow(['Source fingerprints', 'See Source Records', 'Audit events', report.audit.length]);
+  for (let row = 4; row <= 9; row += 1) {
+    summary.getRow(row).font = { name: 'Arial', size: 10, color: { argb: `FF${TEXT}` } };
+    summary.getCell(`A${row}`).font = { name: 'Arial', size: 10, bold: true, color: { argb: `FF${MUTED}` } };
+    summary.getCell(`C${row}`).font = { name: 'Arial', size: 10, bold: true, color: { argb: `FF${MUTED}` } };
+  }
+  summary.getCell('D4').numFmt = 'yyyy-mm-dd hh:mm'; summary.getCell('B5').numFmt = MONEY_FORMAT; summary.getCell('D5').numFmt = MONEY_FORMAT;
+  summary.addRow([]); summary.mergeCells('A11:D11'); summary.getCell('A11').value = 'Report contents';
+  summary.getCell('A11').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: `FF${GREEN}` } }; summary.getCell('A11').font = { name: 'Arial', size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
+  const guide = [
+    ['Open Issues', 'Everything unresolved in the active review or preserved at an earlier period close.'],
+    ['Reconciled', 'Only human-approved invoice matches and cash lodgements.'],
+    ['Period History', 'Closing status, closing comment, reviewer, date and open-item count for each completed period.'],
+    ['Source Records', 'Current and archived invoice, bank, cashbook and stock records with fingerprints.'],
+    ['Decisions', 'Commented resolutions, rejected proposals and period-closing decisions.'],
+    ['AI Evidence', 'Compact Meta brief and Evidence Agent summaries with model, checkpoint status and fingerprint.'],
+    ['Audit Trail', 'Timestamped actions and reviewer identity.'],
+  ];
+  for (const row of guide) { const added = summary.addRow([row[0], row[1]]); summary.mergeCells(`B${added.number}:D${added.number}`); }
+  summary.getRows(12, guide.length).forEach(row => { row.font = { name: 'Arial', size: 10, color: { argb: `FF${TEXT}` } }; row.getCell(1).font = { name: 'Arial', size: 10, bold: true, color: { argb: `FF${GREEN}` } }; row.alignment = { vertical: 'top', wrapText: true }; row.height = 27; });
+  summary.pageSetup = { orientation: 'portrait', paperSize: 9, fitToPage: true, fitToWidth: 1, fitToHeight: 1, margins: { left: 0.35, right: 0.35, top: 0.5, bottom: 0.5, header: 0.2, footer: 0.2 } };
+
+  addRowsSheet(workbook, 'Open Issues', [
+    { header: 'Review period', key: 'period' }, { header: 'Period status', key: 'status' }, { header: 'Issue type', key: 'type' },
+    { header: 'Record(s)', key: 'record' }, { header: 'Date / period', key: 'date' }, { header: 'Customer / description', key: 'detail' },
+    { header: 'Amount (NGN)', key: 'amount', style: { numFmt: MONEY_FORMAT } }, { header: 'Outcome / next action', key: 'nextAction' },
+  ], issues, { A: 28, B: 24, C: 27, D: 38, E: 20, F: 52, G: 18, H: 55 });
+
+  addRowsSheet(workbook, 'Reconciled', [
+    { header: 'Review period', key: 'period' }, { header: 'Reconciliation type', key: 'type' }, { header: 'Source records', key: 'sourceRecords' },
+    { header: 'Customer', key: 'party' }, { header: 'Amount (NGN)', key: 'amount', style: { numFmt: MONEY_FORMAT } },
+    { header: 'Reviewed at', key: 'reviewedAt', style: { numFmt: 'yyyy-mm-dd hh:mm' } }, { header: 'Reviewer', key: 'reviewer' }, { header: 'Evidence / narration', key: 'evidence' },
+  ], reconciledRows(report), { A: 28, B: 22, C: 40, D: 28, E: 18, F: 21, G: 28, H: 52 });
+
+  addRowsSheet(workbook, 'Period History', [
+    { header: 'Review ID', key: 'id' }, { header: 'Period', key: 'title' }, { header: 'Started', key: 'startedAt', style: { numFmt: 'yyyy-mm-dd hh:mm' } },
+    { header: 'Closed', key: 'completedAt', style: { numFmt: 'yyyy-mm-dd hh:mm' } }, { header: 'Closure status', key: 'closureStatus' },
+    { header: 'Open items at close', key: 'openItemCount' }, { header: 'Closing comment', key: 'closingComment' }, { header: 'Closed by', key: 'completedBy' },
+    { header: 'Reconciled value (NGN)', key: 'reconciled', style: { numFmt: MONEY_FORMAT } },
+  ], report.reviewHistory.map(row => ({ id: row.id, title: row.title, startedAt: dateValue(row.startedAt), completedAt: dateValue(row.completedAt), closureStatus: closureLabel(row.closure), openItemCount: row.closure?.openItemCount || 0, closingComment: row.closure?.comment || 'Not recorded for this earlier period', completedBy: reviewerName(row.completedBy), reconciled: amount(row.totals.reconciledKobo ?? (row.totals.approvedInvoiceKobo + row.totals.bankedCashKobo)) })), { A: 24, B: 28, C: 21, D: 21, E: 25, F: 18, G: 72, H: 30, I: 22 });
+
+  addRowsSheet(workbook, 'Source Records', [
+    { header: 'Review period', key: 'period' }, { header: 'Source type', key: 'type' }, { header: 'Record ID', key: 'id' },
+    { header: 'Date', key: 'date', style: { numFmt: 'yyyy-mm-dd' } }, { header: 'Customer / item', key: 'party' }, { header: 'Description / stock detail', key: 'description' },
+    { header: 'Amount (NGN)', key: 'amount', style: { numFmt: MONEY_FORMAT } }, { header: 'Source row', key: 'sourceRow' }, { header: 'Source SHA-256', key: 'sourceHash' },
+  ], sourceRows(report), { A: 28, B: 14, C: 18, D: 15, E: 30, F: 65, G: 18, H: 12, I: 68 });
+
+  addRowsSheet(workbook, 'Decisions', [
+    { header: 'Review period', key: 'period' }, { header: 'Decision', key: 'type' }, { header: 'Record(s)', key: 'records' },
+    { header: 'Amount (NGN)', key: 'amount', style: { numFmt: MONEY_FORMAT } }, { header: 'Decision time', key: 'decisionAt', style: { numFmt: 'yyyy-mm-dd hh:mm' } },
+    { header: 'Reviewer', key: 'reviewer' }, { header: 'Comment / reason', key: 'comment' },
+  ], decisionRows(report), { A: 28, B: 30, C: 38, D: 18, E: 21, F: 30, G: 72 });
+
+  addRowsSheet(workbook, 'AI Evidence', [
+    { header: 'Review period', key: 'period' }, { header: 'Evidence type', key: 'type' }, { header: 'Reference / question', key: 'reference' },
+    { header: 'Created at', key: 'createdAt', style: { numFmt: 'yyyy-mm-dd hh:mm' } }, { header: 'Meta model', key: 'model' },
+    { header: 'Human checkpoint', key: 'status' }, { header: 'Finding / summary', key: 'summary' }, { header: 'Source fingerprint', key: 'fingerprint' },
+  ], aiEvidenceRows(report), { A: 28, B: 24, C: 54, D: 21, E: 20, F: 20, G: 72, H: 68 });
+
+  addRowsSheet(workbook, 'Audit Trail', [
+    { header: 'Review period', key: 'reviewTitle' }, { header: 'Timestamp', key: 'at', style: { numFmt: 'yyyy-mm-dd hh:mm' } }, { header: 'Action', key: 'action' },
+    { header: 'Record / invoice', key: 'record' }, { header: 'Bank ID', key: 'bankId' }, { header: 'Reviewer', key: 'reviewer' },
+    { header: 'Reviewer email', key: 'reviewerEmail' }, { header: 'Comment / detail', key: 'comment' }, { header: 'Open items', key: 'openItemCount' },
+  ], report.audit.map(event => ({ ...event, at: dateValue(event.at), record: event.recordId || event.invoiceId || '', reviewer: reviewerName(event.actor) || event.by || 'System', reviewerEmail: event.actor?.email || '', comment: event.comment || (event.kind ? `${event.rows || 0} ${event.kind} rows` : ''), openItemCount: event.openItemCount ?? null })), { A: 28, B: 21, C: 28, D: 20, E: 16, F: 28, G: 32, H: 72, I: 14 });
+
+  for (const sheet of workbook.worksheets.filter(row => row.name !== 'Summary')) {
+    for (const column of sheet.columns) if (['detail', 'nextAction', 'evidence', 'closingComment', 'description', 'comment', 'summary', 'reference'].includes(column.key)) column.alignment = { vertical: 'top', wrapText: true };
+  }
+  return Buffer.from(await workbook.xlsx.writeBuffer());
+}
+
 function pdfTable(doc, headers, rows, widths, aligns = []) {
   const left = doc.page.margins.left;
   const bottom = doc.page.height - doc.page.margins.bottom - 20;
@@ -431,7 +615,7 @@ function pdfTable(doc, headers, rows, widths, aligns = []) {
   doc.moveDown(0.7);
 }
 
-export async function buildReviewPdf(report) {
+async function buildLegacyReviewPdf(report) {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ size: 'A4', layout: 'landscape', bufferPages: true, margins: { top: 54, right: 42, bottom: 48, left: 42 }, info: { Title: report.title, Author: 'NaijaLedger', Subject: 'Sales-to-bank reconciliation review pack' } });
     const chunks = [];
@@ -607,3 +791,82 @@ export async function buildReviewPdf(report) {
     doc.end();
   });
 }
+
+export async function buildReviewPdf(report) {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: 'A4', layout: 'landscape', bufferPages: true, margins: { top: 54, right: 42, bottom: 48, left: 42 }, info: { Title: 'NaijaLedger review report', Author: 'NaijaLedger', Subject: 'Human-reviewed reconciliation evidence' } });
+    const chunks = [];
+    doc.on('data', chunk => chunks.push(chunk)); doc.on('error', reject); doc.on('end', () => resolve(Buffer.concat(chunks)));
+    const decorate = () => {
+      const x = doc.x; const y = doc.y;
+      doc.save().font('Helvetica-Bold').fontSize(8).fillColor(`#${GREEN}`).text('NaijaLedger', 42, 25, { lineBreak: false });
+      doc.moveTo(42, 40).lineTo(doc.page.width - 42, 40).strokeColor(`#${BORDER}`).lineWidth(0.5).stroke().restore(); doc.x = x; doc.y = y;
+    };
+    doc.on('pageAdded', decorate); decorate();
+    const ensure = height => { if (doc.y + height > doc.page.height - doc.page.margins.bottom - 20) doc.addPage(); };
+    const section = title => { ensure(60); doc.x = doc.page.margins.left; doc.moveDown(0.55).font('Helvetica-Bold').fontSize(11).fillColor(`#${GREEN}`).text(text(title)); doc.moveTo(doc.page.margins.left, doc.y + 3).lineTo(doc.page.width - doc.page.margins.right, doc.y + 3).strokeColor(`#${BORDER}`).lineWidth(0.6).stroke(); doc.moveDown(0.7); };
+    const paragraph = (value, options = {}) => { ensure(32); doc.x = doc.page.margins.left; doc.font(options.bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(options.size || 8.5).fillColor(options.color || `#${TEXT}`).text(text(value), { lineGap: 2, ...options }); doc.moveDown(options.after ?? 0.45); };
+
+    const issues = openIssueRows(report);
+    const reconciled = reconciledRows(report);
+    const decisions = decisionRows(report);
+    const ai = aiEvidenceRows(report);
+    const activePeriod = report.reviewCycle?.title || 'Current review';
+    const activeIssues = issues.filter(row => row.period === activePeriod && row.status === 'Open in active review').length;
+
+    doc.font('Helvetica-Bold').fontSize(22).fillColor(`#${GREEN}`).text('NaijaLedger review report');
+    doc.font('Helvetica').fontSize(9).fillColor(`#${MUTED}`).text(`Generated ${iso(report.generatedAt).replace('T', ' ').replace('.000Z', ' UTC')}`);
+    doc.moveDown(0.8);
+    const noticeY = doc.y; doc.save().roundedRect(42, noticeY, doc.page.width - 84, 40, 7).fill(`#${AMBER}`).restore();
+    doc.fillColor('#7A5421').font('Helvetica-Bold').fontSize(9).text('Open items are disclosed, remain unresolved, and are excluded from reconciled value. This report is not a tax filing or accounting certification.', 54, noticeY + 11, { width: doc.page.width - 108 }); doc.y = noticeY + 54;
+
+    section('Decision summary');
+    pdfTable(doc, ['Metric', 'Value', 'Metric', 'Value'], [
+      ['Current period', activePeriod, 'Current open items', activeIssues],
+      ['Reconciled value', ngn(report.totals.reconciledKobo), 'Ledger-reviewed sales', ngn(report.totals.ledgerReviewedKobo)],
+      ['Approved invoice matches', report.matches.length, 'Approved cash lodgements', report.cashReview.matches.length],
+      ['Invoices / bank rows', `${report.invoices.length} / ${report.bank.length}`, 'Cash / stock rows', `${report.cashbook.length} / ${report.stockReview.items.length}`],
+      ['Completed periods', report.reviewHistory.length, 'Audit events', report.audit.length],
+    ], [122, 116, 122, 116], ['left', 'right', 'left', 'right']);
+
+    section('Completed period status and closing comments');
+    if (report.reviewHistory.length) pdfTable(doc, ['Period', 'Closed', 'Status', 'Open', 'Reviewer', 'Closing comment'], report.reviewHistory.map(row => [
+      row.title, iso(row.completedAt).replace('T', ' ').replace('.000Z', ' UTC'), closureLabel(row.closure), row.closure?.openItemCount || 0, reviewerName(row.completedBy), row.closure?.comment || 'Not recorded for this earlier period',
+    ]), [92, 92, 90, 38, 82, 136], ['left', 'left', 'left', 'right', 'left', 'left']);
+    else paragraph('No completed periods yet.', { color: `#${MUTED}` });
+
+    section('Open and unresolved items');
+    if (issues.length) pdfTable(doc, ['Period', 'Status', 'Issue', 'Record(s)', 'Description', 'Amount / outcome'], issues.map(row => [
+      row.period, row.status, row.type, row.record, row.detail || row.nextAction, row.amount == null ? row.nextAction : `NGN ${Number(row.amount).toLocaleString('en-NG', { minimumFractionDigits: 2 })}`,
+    ]), [78, 82, 86, 92, 148, 72]);
+    else paragraph('No open issues in the active review or completed-period history.', { color: `#${GREEN}`, bold: true });
+
+    section('Approved reconciliations');
+    if (reconciled.length) pdfTable(doc, ['Period', 'Type', 'Source records', 'Customer', 'Amount', 'Reviewed by'], reconciled.map(row => [
+      row.period, row.type, row.sourceRecords, row.party, `NGN ${Number(row.amount).toLocaleString('en-NG', { minimumFractionDigits: 2 })}`, row.reviewer,
+    ]), [88, 76, 120, 92, 78, 70], ['left', 'left', 'left', 'left', 'right', 'left']);
+    else paragraph('No human-approved reconciliations.', { color: `#${MUTED}` });
+
+    section('Human decisions and audit comments');
+    if (decisions.length) pdfTable(doc, ['Period', 'Decision', 'Record(s)', 'Reviewer', 'Comment / reason'], decisions.map(row => [row.period, row.type, row.records, row.reviewer, row.comment]), [86, 104, 88, 86, 160]);
+    else paragraph('No commented resolutions, rejected proposals or completed-period decisions.', { color: `#${MUTED}` });
+
+    section('Meta evidence summary');
+    if (ai.length) pdfTable(doc, ['Period', 'Type', 'Reference / question', 'Model', 'Checkpoint', 'Finding / summary'], ai.map(row => [row.period, row.type, row.reference, row.model, row.status, row.summary]), [72, 80, 130, 70, 66, 146]);
+    else paragraph('No Meta evidence outputs were generated.', { color: `#${MUTED}` });
+
+    section('Audit trail');
+    if (report.audit.length) pdfTable(doc, ['Timestamp', 'Period', 'Action', 'Record', 'Reviewer', 'Comment / detail'], report.audit.map(event => [
+      iso(event.at).replace('T', ' ').replace('.000Z', ' UTC'), event.reviewTitle || activePeriod, event.action, event.recordId || event.invoiceId || event.bankId || '', reviewerName(event.actor) || event.by || 'System', event.comment || (event.kind ? `${event.rows || 0} ${event.kind} rows` : ''),
+    ]), [86, 82, 90, 68, 76, 126]);
+    else paragraph('No audit activity.', { color: `#${MUTED}` });
+
+    const pages = doc.bufferedPageRange();
+    for (let index = pages.start; index < pages.start + pages.count; index += 1) {
+      doc.switchToPage(index); const x = doc.x; const y = doc.y;
+      doc.font('Helvetica').fontSize(7).fillColor(`#${MUTED}`).text(`Page ${index + 1} of ${pages.count} | Human review required | NaijaLedger`, 42, doc.page.height - doc.page.margins.bottom - 13, { width: doc.page.width - 84, align: 'center', lineBreak: false }); doc.x = x; doc.y = y;
+    }
+    doc.end();
+  });
+}
+
