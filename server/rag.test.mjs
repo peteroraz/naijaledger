@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildRagChunks, createRagAgent } from './rag.mjs';
+import { buildRagChunks, createRagAgent, hasUnsafeDecisionClaim } from './rag.mjs';
 import { seedWorkspace } from './store.mjs';
 
 const generated = (question, fingerprint) => ({
@@ -94,6 +94,36 @@ test('cash-lodgement questions retrieve the proposal, its cash rows, candidate b
     },
   });
   await agent.answer({ uid: 'alice', state, question: 'Which cashbook entries support the daily cash lodgement to BNK-008?' });
+});
+
+test('broad cash-lodgement questions preserve every linked row for each selected proposal', async () => {
+  const state = seedWorkspace();
+  const agent = createRagAgent({
+    apiKey: 'test-only',
+    generator: async (question, evidence, fingerprint) => {
+      assert.deepEqual(
+        evidence.filter(chunk => chunk.type === 'current_cash_batch').map(chunk => chunk.id),
+        ['cash-batch:daily:BNK-008', 'cash-batch:weekly:BNK-009'],
+      );
+      for (const id of ['CASH-001', 'CASH-002', 'CASH-003', 'CASH-004', 'CASH-005']) {
+        assert.ok(evidence.some(chunk => chunk.id === `cash:${id}`), `${id} should be retrieved`);
+      }
+      assert.ok(evidence.some(chunk => chunk.id === 'bank:BNK-008'));
+      assert.ok(evidence.some(chunk => chunk.id === 'bank:BNK-009'));
+      assert.equal(evidence.filter(chunk => chunk.type === 'policy').length, 1);
+      assert.equal(evidence.length, 10);
+      return generated(question, fingerprint);
+    },
+  });
+  await agent.answer({ uid: 'alice', state, question: 'Which cashbook entries are not yet supported by a bank lodgement?' });
+});
+
+test('decision boundary permits explicit human-control language and blocks automatic decisions', () => {
+  assert.equal(hasUnsafeDecisionClaim('The batch is not approved. Human review is required before any reconciliation.'), false);
+  assert.equal(hasUnsafeDecisionClaim('Do not post this proposal; it requires human approval.'), false);
+  assert.equal(hasUnsafeDecisionClaim('The batch is automatically approved and can be posted.'), true);
+  assert.equal(hasUnsafeDecisionClaim('The batch can be posted automatically.'), true);
+  assert.equal(hasUnsafeDecisionClaim('The difference should be written off.'), true);
 });
 
 test('completed history is gated for active questions and retrieved for explicit history questions', async () => {

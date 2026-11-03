@@ -212,6 +212,7 @@ function lexicalRetrieve(chunks, question, limit = 14) {
 function selectEvidence(chunks, lexical, question, limit = 10) {
   const queryText = clean(question).toLowerCase();
   const asksHistory = /\b(?:history|previous|prior|last|completed|archived|earlier)\b/.test(queryText);
+  const asksCash = /\b(?:cash|cashbook|daybook|lodgement|deposit|cashier|batch|takings)\b/.test(queryText);
   const historicalTypes = new Set(['review_history', 'manual_resolution_history']);
   const activeRanked = lexical.filter(chunk => !historicalTypes.has(chunk.type));
   const hasActiveEvidence = activeRanked.some(chunk => chunk.type !== 'policy');
@@ -239,16 +240,35 @@ function selectEvidence(chunks, lexical, question, limit = 10) {
   const add = chunk => { if (chunk && !selected.some(item => item.id === chunk.id) && selected.length < limit) selected.push(chunk); };
   referencedInvoices.forEach(add);
   if (referencedInvoices.length) ranked.filter(chunk => chunk.type === 'bank').slice(0, 3).forEach(add);
-  if (/\b(?:cash|cashbook|daybook|lodgement|deposit|cashier|batch|takings)\b/.test(queryText)) {
-    const batch = ranked.find(chunk => chunk.type === 'current_cash_batch');
-    add(batch);
-    if (batch) {
-      (batch.cashEntryIds || []).map(id => chunks.find(chunk => chunk.id === `cash:${id}`)).slice(0, 3).forEach(chunk => add(chunk && {
+  let selectedCashBundle = false;
+  if (asksCash) {
+    const rankedBatches = [
+      ...ranked.filter(chunk => chunk.type === 'current_cash_batch'),
+      ...chunks.filter(chunk => chunk.type === 'current_cash_batch' && !ranked.some(item => item.id === chunk.id)),
+    ];
+    const namedBatch = rankedBatches.find(batch => queryText.includes(String(batch.bankId || '').toLowerCase())
+      || (batch.cashEntryIds || []).some(id => queryText.includes(String(id).toLowerCase())));
+    const namedFrequency = /\b(daily|weekly)\b/.exec(queryText)?.[1];
+    const candidateBatches = namedBatch
+      ? [namedBatch]
+      : namedFrequency
+        ? rankedBatches.filter(batch => batch.frequency === namedFrequency)
+        : rankedBatches;
+
+    for (const batch of candidateBatches) {
+      const cashRows = (batch.cashEntryIds || []).map(id => chunks.find(chunk => chunk.id === `cash:${id}`));
+      const bankRow = chunks.find(chunk => chunk.id === `bank:${batch.bankId}`);
+      const bundle = [batch, ...cashRows, bankRow].filter(Boolean);
+      const newItems = bundle.filter(chunk => !selected.some(item => item.id === chunk.id));
+      if (cashRows.some(row => !row) || !bankRow || selected.length + newItems.length > limit - 1) continue;
+      add(batch);
+      cashRows.forEach(chunk => add({
         ...chunk, retrievalReason: `included in current ${batch.frequency || 'cash'} batch ${batch.ref}`,
       }));
-      const batchBank = chunks.find(chunk => chunk.id === `bank:${batch.bankId}`);
-      add(batchBank && { ...batchBank, retrievalReason: `candidate bank row for current cash batch ${batch.ref}` });
-    } else {
+      add({ ...bankRow, retrievalReason: `candidate bank row for current cash batch ${batch.ref}` });
+      selectedCashBundle = true;
+    }
+    if (!selectedCashBundle) {
       ranked.filter(chunk => chunk.type === 'cashbook').slice(0, 3).forEach(add);
       ranked.filter(chunk => chunk.type === 'bank').slice(0, 2).forEach(add);
     }
@@ -261,6 +281,7 @@ function selectEvidence(chunks, lexical, question, limit = 10) {
   const typeCounts = new Map(selected.map(chunk => [chunk.type, selected.filter(item => item.type === chunk.type).length]));
   for (const chunk of ranked.filter(item => item.type !== 'policy')) {
     if (selected.length >= limit - 1) break;
+    if (asksCash && selectedCashBundle && ['current_cash_batch', 'cashbook', 'bank'].includes(chunk.type)) continue;
     const cap = chunk.type === 'bank' ? 3 : 4;
     if ((typeCounts.get(chunk.type) || 0) >= cap) continue;
     const before = selected.length;
@@ -297,10 +318,15 @@ async function requestJson({ apiKey, fetcher, messages, responseFormat, maxToken
 const answerText = value => [value.finding, ...(value.evidence || []).map(item => item.statement), value.calculation, ...(value.missingEvidence || []), value.nextCheck, value.decisionBoundary].join('\n');
 const currencyAmounts = value => [...clean(value, 5_000).matchAll(/(?:₦|NGN\s*)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/gi)]
   .map(match => Math.round(Number(match[1].replaceAll(',', '')) * 100)).filter(Number.isFinite);
-const unsafeClaims = value => value.split(/(?<=[.!?])\s+/).some(sentence => {
-  if (/\b(?:do not|don't|never|cannot|must not|requires? human|human review)\b/i.test(sentence)) return false;
-  return /\b(?:approve|approved|write[- ]?off|written off|settled|paid|reconciled|post(?:ed)?|classif(?:y|ied)|tax[- ]deductible|tax treatment)\b/i.test(sentence)
-    && /\b(?:automatically|definitely|confirmed|should|is|was|has been|can be|proceed|therefore)\b/i.test(sentence);
+export const hasUnsafeDecisionClaim = value => value.split(/(?<=[.!?])\s+/).some(sentence => {
+  const decided = '(?:approved|written off|settled|paid|reconciled|posted|classified|tax-deductible|assigned a tax treatment)';
+  const decide = '(?:approve|write[- ]?off|settle|reconcile|post|classify|assign(?:ed)? a tax treatment)';
+  return new RegExp(`\\bautomatically\\s+(?:${decide}|${decided})\\b`, 'i').test(sentence)
+    || new RegExp(`\\b${decided}\\s+automatically\\b`, 'i').test(sentence)
+    || new RegExp(`\\b(?:is|was|has been|can be|should be|must be)\\s+(?:automatically\\s+)?${decided}\\b`, 'i').test(sentence)
+    || new RegExp(`\\b(?:should|can|may)\\s+(?:now\\s+)?${decide}\\b`, 'i').test(sentence)
+    || new RegExp(`\\b(?:definitely|confirmed(?: as)?)\\s+${decided}\\b`, 'i').test(sentence)
+    || new RegExp(`\\bproceed(?:s|ed|ing)?\\s+(?:with|to)\\s+(?:${decide}|approval|posting|settlement|reconciliation|classification)\\b`, 'i').test(sentence);
 });
 
 async function generateAnswer(question, selected, sourceFingerprint, { apiKey, fetcher }) {
@@ -344,7 +370,7 @@ async function generateAnswer(question, selected, sourceFingerprint, { apiKey, f
     { id: 'citations', label: 'Citation integrity', passed: evidence.length > 0 && invalidIds.length === 0, detail: invalidIds.length ? `Unknown citations blocked: ${[...new Set(invalidIds)].join(', ')}` : `${evidence.length} cited sources checked.` },
     { id: 'claim-coverage', label: 'Material claim coverage', passed: materialClaimCitations, detail: materialClaimCitations ? 'The finding is accompanied by source-addressable evidence.' : 'The finding has no source-addressable evidence statement.' },
     { id: 'amounts', label: 'Amount integrity', passed: unsupportedAmounts.length === 0, detail: unsupportedAmounts.length ? `${unsupportedAmounts.length} unsupported currency value(s) were blocked.` : 'Currency values match a retrieved source value or a two-source sum/difference.' },
-    { id: 'policy', label: 'Decision boundary', passed: !unsafeClaims(answerText(answer)), detail: unsafeClaims(answerText(answer)) ? 'An automatic decision claim was blocked.' : 'No automatic settlement, adjustment, or tax conclusion.' },
+    { id: 'policy', label: 'Decision boundary', passed: !hasUnsafeDecisionClaim(answerText(answer)), detail: hasUnsafeDecisionClaim(answerText(answer)) ? 'An automatic decision claim was blocked.' : 'No automatic settlement, adjustment, or tax conclusion.' },
   ];
   const deterministicPassed = checks.every(check => check.passed);
   let modelReview = { model: MODEL, verdict: 'skipped', checkedClaims: 0, issues: [] };
