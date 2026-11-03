@@ -244,7 +244,8 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
   const consumeDemoModelCall = async (req, kind) => {
     if (!req.isAnonymous) return;
     consumePublicDemoRequest(req);
-    await store.consumeDemoQuota(req.uid, kind, DEMO_LIMITS[kind]);
+    const limit = DEMO_LIMITS[kind];
+    if (limit !== null) await store.consumeDemoQuota(req.uid, kind, limit);
   };
   app.disable('x-powered-by');
   app.use(express.json({ limit: '1mb' }));
@@ -632,3 +633,4 @@ export function createApp({ verifyToken, store, investigate = investigateWithMet
   });
   return app;
 }
+

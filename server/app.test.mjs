@@ -93,7 +93,7 @@ test('Judge Demo is isolated, bounded, resettable, and cannot refresh model allo
     const initial = await request('judge', '/workspace');
     assert.equal(initial.status, 200);
     assert.equal(initial.data.demo.isDemo, true);
-    assert.deepEqual(initial.data.demo.limits, { intake: 3, investigate: 5, agent: 3 });
+    assert.deepEqual(initial.data.demo.limits, { intake: null, investigate: 5, agent: 3 });
     assert.deepEqual(initial.data.demo.usage, { intake: 0, investigate: 0, agent: 0 });
 
     const approved = await request('judge', '/approvals', { invoiceId: 'INV-001', bankId: 'BNK-001', version: initial.data.version });
@@ -193,6 +193,35 @@ test('proposal rejection, reconsideration, approval undo, and audited source rep
     assert.equal(replaced.data.bank[0].id, 'NEW-001');
     assert.equal(replaced.data.audit.at(-1).action, 'source-replaced');
     assert.equal(replaced.data.matches.length, 0);
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});
+
+test('Judge Demo Smart Intake has no per-workspace extraction ceiling', async () => {
+  const store = createFirestoreStore(fakeFirestore());
+  let extractionCalls = 0;
+  const { server, url } = await serve(store, async () => { throw new Error('Not used'); }, async (_files, text) => {
+    extractionCalls += 1;
+    const createdAt = new Date(Date.UTC(2026, 10, 3, 12, 0, extractionCalls)).toISOString();
+    return {
+      id: `intake-unlimited-${extractionCalls}`, createdAt, model: 'muse-spark-1.3', voiceModel: 'muse-voice-transcribe-1.0',
+      sourceFingerprint: String(extractionCalls).padStart(64, '0'), status: 'awaiting_human_review',
+      sources: [{ id: `typed-${extractionCalls}`, name: 'Typed entry', type: 'text', mimeType: 'text/plain', sha256: 'a'.repeat(64), size: text.length, status: 'extracted', entryCount: 0 }],
+      candidates: [],
+    };
+  });
+  try {
+    let workspace = await (await fetch(`${url}/api/workspace`, { headers: { Authorization: 'Bearer judge' } })).json();
+    assert.equal(workspace.demo.limits.intake, null);
+    for (let attempt = 1; attempt <= 4; attempt += 1) {
+      const form = new FormData();
+      form.append('version', String(workspace.version));
+      form.append('text', `Judge extraction attempt ${attempt}`);
+      const response = await fetch(`${url}/api/intake/extract`, { method: 'POST', headers: { Authorization: 'Bearer judge' }, body: form });
+      assert.equal(response.status, 200, await response.text());
+      workspace = await response.json();
+      assert.equal(workspace.demo.usage.intake, 0);
+    }
+    assert.equal(extractionCalls, 4);
   } finally { await new Promise(resolve => server.close(resolve)); }
 });
 
@@ -470,3 +499,4 @@ test('cash lodgements, stock counts, and completed review history are versioned 
     assert.equal(nextPeriod.data.reviewHistory.length, 1, 'starting a new period must preserve completed review history');
   } finally { await new Promise(resolve => server.close(resolve)); }
 });
+
