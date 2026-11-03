@@ -13,7 +13,7 @@ import { buildReviewPdf, buildReviewWorkbook, createReviewPack } from './review-
 import { seedWorkspace } from './store.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
-export const DEMO_LIMITS = Object.freeze({ intake: 3, investigate: 5, agent: 3 });
+export const DEMO_LIMITS = Object.freeze({ intake: null, investigate: 5, agent: 3 });
 const MAX_AUDIT_EVENTS = 1_000;
 const audit = (state, event) => { state.audit = [...(state.audit || []), event].slice(-MAX_AUDIT_EVENTS); };
 const proposalKey = proposal => proposal.cashEntryIds
